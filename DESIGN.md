@@ -40,11 +40,13 @@ DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **even
 | G11 | **Authoritative local DNS server** for any zone it owns. DNSDave answers authoritatively (AA flag set, SOA in authority section) for configured zones and never forwards those queries upstream. Supports zone transfers (AXFR/IXFR), NOTIFY to secondaries, and RFC 2136 dynamic updates. |
 | G12 | **Conditional DNS forwarding.** Named forward zones route queries for specific domains to designated upstream resolvers, bypassing the global upstream pool and the blocklist. Essential for VPN/corporate split-DNS, multi-site internal networks, and ISP-delegated zones. |
 | G13 | **DNSSEC support** at two levels: (a) *validation* — verify cryptographic signatures on responses from upstream resolvers and set the AD bit; (b) *signing* — sign owned zones with ZSK/KSK key pairs, serve DNSKEY/RRSIG/NSEC3 records, and expose DS records for delegation. |
+| G14 | **Multi-architecture native binaries and container images.** Every container ships as a multi-arch manifest covering `linux/amd64`, `linux/arm64` (Raspberry Pi 3+ running 64-bit OS, Apple Silicon servers, AWS Graviton), and `linux/arm/v7` (Raspberry Pi 3+ running 32-bit OS). Development builds are supported on `macOS/arm64` (Apple Silicon) and `macOS/x86_64` without modification. |
 
 ### Non-Goals (v1)
 
 - Building a full recursive resolver (we forward upstream for non-local zones).
 - Automated DNSSEC key ceremony with HSM hardware (key operations are software-only via `ring`/`rcgen`).
+- `linux/arm/v6` (Raspberry Pi 1/Zero) — insufficient RAM and no hardware FPU for the blocklist data structures.
 - A bundled web UI (the API is the product; a reference SPA can come later).
 
 ---
@@ -117,6 +119,38 @@ graph TD
 **The DNS container offloads all side-effects.** Query log writes, stats updates, dynamic DNS from DHCP leases, and any future integrations are downstream consumers of NATS subjects. The hot path fires a non-blocking NATS publish and moves on.
 
 **New functionality = new consumer.** Alerting, webhooks, InfluxDB export, SIEM integration — all are new containers subscribing to the bus. The DNS and API containers are never modified.
+
+### 3.4 Supported Platforms
+
+Every container ships as a **multi-arch manifest** so the same `docker pull` command works on any supported host with no flags.
+
+| Platform | Docker target | Example hardware | Notes |
+|----------|--------------|-----------------|-------|
+| `linux/amd64` | `x86_64-unknown-linux-gnu` | x86_64 servers, desktops, VMs | Primary development target |
+| `linux/arm64` | `aarch64-unknown-linux-gnu` | Raspberry Pi 3/4/5 (64-bit OS), Apple Silicon (Rosetta-free), AWS Graviton 2/3 | Preferred Pi target; 64-bit OS required |
+| `linux/arm/v7` | `armv7-unknown-linux-gnueabihf` | Raspberry Pi 3+ (32-bit Raspberry Pi OS) | Supported but 64-bit OS on Pi is recommended |
+| `macOS/arm64` | `aarch64-apple-darwin` | Apple Silicon (M1/M2/M3/M4) | Development only; `SO_REUSEPORT` + `recvmmsg` fallback active |
+| `macOS/x86_64` | `x86_64-apple-darwin` | Intel Mac | Development only; same fallbacks as macOS/arm64 |
+
+**Raspberry Pi minimum requirements:**
+
+| Model | RAM | Recommended OS | Profile |
+|-------|-----|---------------|---------|
+| Pi 3 Model B+ | 1 GB | 64-bit Raspberry Pi OS | `docker-compose.minimal.yml` (no `dnsdave-stats`, `dnsdave-log`; SQLite) |
+| Pi 4 Model B | 2–8 GB | 64-bit Raspberry Pi OS | Full stack; 4 GB+ recommended for blocklist at scale |
+| Pi 5 | 4–16 GB | 64-bit Raspberry Pi OS | Full stack; `recvmmsg` supported on Linux |
+
+**Architecture-specific behaviour:**
+
+| Concern | x86_64 | arm64 | arm/v7 |
+|---------|--------|-------|-------|
+| `recvmmsg`/`sendmmsg` | ✓ (Linux) | ✓ (Linux) | ✓ (Linux) |
+| SIMD byte scanning (`memchr`) | AVX2 / SSE4.2 | NEON | NEON (32-bit) |
+| Bloom filter hashing | xxHash3 (hardware CRC32) | xxHash3 (hardware CRC32 via ARMv8) | xxHash3 (software fallback) |
+| `ring` ECDSA/Ed25519 | ✓ | ✓ | ✓ |
+| 300 MB RSS target (full blocklist) | ✓ | ✓ | ✓ (within 1 GB) |
+
+SIMD paths are **runtime-detected** — the same binary runs on CPUs with and without AVX2/NEON extensions. No compile-time feature flags required for target-specific acceleration.
 
 ---
 
@@ -326,8 +360,12 @@ All NATS publishes are **non-blocking writes to the async-nats client buffer** �
 
 N Tokio tasks (one per CPU core) each own a UDP socket bound to `:53` with `SO_REUSEPORT`. The kernel distributes packets across sockets via consistent hash of source IP + port — no userspace lock on the receive path.
 
-On Linux: `recvmmsg`/`sendmmsg` batch I/O (up to 64 packets per syscall).  
-On macOS (dev): standard `recv_from` / `send_to` fallback.
+| Platform | Batch I/O | `SO_REUSEPORT` |
+|----------|-----------|----------------|
+| Linux `x86_64` / `arm64` / `arm/v7` | `recvmmsg`/`sendmmsg` (up to 64 packets/syscall) | ✓ kernel 3.9+ (Pi 3+ kernel ≥ 4.4) |
+| macOS `arm64` / `x86_64` (dev) | `recv_from` / `send_to` single-packet fallback | ✓ (macOS 10.13+) |
+
+The I/O tier is selected at **compile time** via `#[cfg(target_os)]`; no runtime branching on the hot path.
 
 ### 5.3 Zero-Allocation Hot Path
 
@@ -361,7 +399,7 @@ All hot-path lookups use `ArcSwap` — readers load an Arc with a single atomic 
 ### 5.6 Blocklist Parser — Streaming, Zero-Copy
 
 - Stream-read HTTP response body; transparent gzip/zstd decompression.
-- `memchr` crate SIMD-accelerated newline scanning (AVX2 on x86_64, NEON on ARM64).
+- `memchr` crate SIMD-accelerated newline scanning — AVX2 on `x86_64`, NEON on `arm64`, NEON (32-bit) on `arm/v7`; scalar fallback auto-selected at runtime on CPUs lacking SIMD extensions.
 - In-place lowercase via 256-byte lookup table; no regex; no per-line allocation.
 - Multiple lists fetched and parsed concurrently with Tokio tasks.
 
@@ -1453,6 +1491,114 @@ Both `dnsdave-dns` and `dnsdave-dhcp` run as **DaemonSets** with `hostNetwork: t
 CLI flags > Environment Variables > Config file (YAML) > Defaults
 ```
 
+### 11.8 Multi-Architecture Builds
+
+All containers are built as **multi-arch Docker manifests** and pushed to GHCR. A single `docker pull ghcr.io/dnsdave/dnsdave-dns:latest` resolves to the correct image for the host CPU automatically.
+
+#### Rust Cross-Compilation Targets
+
+| Docker platform | Rust target triple | Linker |
+|----------------|-------------------|--------|
+| `linux/amd64` | `x86_64-unknown-linux-gnu` | native |
+| `linux/arm64` | `aarch64-unknown-linux-gnu` | `aarch64-linux-gnu-gcc` |
+| `linux/arm/v7` | `armv7-unknown-linux-gnueabihf` | `arm-linux-gnueabihf-gcc` |
+
+Cross-compilation uses the [`cross`](https://github.com/cross-rs/cross) tool (Docker-based) for local builds, and GitHub Actions with QEMU emulation or native ARM runners for CI.
+
+#### GitHub Actions CI Matrix
+
+```yaml
+# .github/workflows/build.yml (excerpt)
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner:   ubuntu-latest
+            target:   x86_64-unknown-linux-gnu
+          - platform: linux/arm64
+            runner:   ubuntu-latest        # QEMU; or ubuntu-latest-arm64 if available
+            target:   aarch64-unknown-linux-gnu
+          - platform: linux/arm/v7
+            runner:   ubuntu-latest        # QEMU
+            target:   armv7-unknown-linux-gnueabihf
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3      # enables arm64/arm emulation
+      - uses: docker/setup-buildx-action@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cross-compile
+        uses: cross-rs/cross@v0.2
+        with:
+          command: build
+          args: --release --target ${{ matrix.target }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ghcr.io/dnsdave/${{ matrix.container }}:latest
+```
+
+The final step in CI calls `docker buildx imagetools create` to merge all per-platform images into a single multi-arch manifest.
+
+#### macOS Development Builds
+
+No Docker required for local development on macOS. Rust natively targets the host:
+
+```bash
+# Apple Silicon
+cargo build --target aarch64-apple-darwin
+
+# Intel Mac
+cargo build --target x86_64-apple-darwin
+
+# Run locally (uses recv_from/send_to fallback; SO_REUSEPORT active)
+cargo run --bin dnsdave-dns -- --config dev.toml
+```
+
+`docker-compose.yml` works on Docker Desktop for Mac (arm64 on Apple Silicon, x86_64 on Intel). NATS, Postgres, and the UI containers pull the correct arch variant automatically.
+
+#### Raspberry Pi Low-Memory Profile (`docker-compose.minimal.yml`)
+
+Pi 3 (1 GB RAM) cannot comfortably run the full stack alongside an OS. A minimal compose profile omits `dnsdave-log`, `dnsdave-stats`, and `dnsdave-ui`, and switches to SQLite:
+
+```yaml
+# docker-compose.minimal.yml (key differences)
+services:
+  dnsdave-dns:
+    environment:
+      DNSDAVE_WORKERS: "4"                  # match Pi 3's 4 cores
+      DNSDAVE_CACHE_SIZE_MB: "32"           # reduce moka cache
+      DNSDAVE_BLOOM_MAX_DOMAINS: "1000000"  # 1M-domain blocklist cap (~20 MB)
+
+  dnsdave-api:
+    environment:
+      DNSDAVE_DB_URL: "sqlite:///data/dnsdave.db"  # no Postgres needed
+
+  nats:
+    command: ["-js", "-m", "8222", "--max_memory_store=64MB", "--max_file_store=256MB"]
+```
+
+**Pi 3 memory budget at idle (minimal profile):**
+
+| Component | RSS |
+|-----------|-----|
+| `dnsdave-dns` (1M blocklist, 32 MB cache) | ~130 MB |
+| `dnsdave-api` + SQLite | ~30 MB |
+| `dnsdave-dhcp` | ~20 MB |
+| NATS | ~25 MB |
+| OS + kernel | ~100 MB |
+| **Total** | **~305 MB** (of 1 GB) |
+
+Pi 4 (2 GB+) can run the full stack comfortably, including `dnsdave-log`, `dnsdave-stats`, and Postgres.
+
 ---
 
 ## 12. Observability
@@ -1755,7 +1901,8 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 | OpenAPI | `utoipa` + `aide` | Generates spec from handler annotations |
 | Serialisation (events) | `rmp-serde` (MessagePack) | ~300–420 bytes per event; no JSON parsing overhead |
 | Container base | `gcr.io/distroless/cc` | No shell; minimal attack surface |
-| CI | GitHub Actions | Multi-arch build (amd64 + arm64); push to GHCR |
+| CI | GitHub Actions | Multi-arch build (`linux/amd64`, `linux/arm64`, `linux/arm/v7`); QEMU via `docker/setup-qemu-action`; `cross` for Rust cross-compilation; multi-arch manifests pushed to GHCR |
+| Cross-compilation | `cross` (cross-rs) | Docker-based Rust cross-compilation; same binary produced locally and in CI |
 | Benchmarking | `criterion` + `dnsperf` + `flamethrower` | Microbenchmarks + QPS + flamegraph |
 
 ### 15.3 Language Rationale

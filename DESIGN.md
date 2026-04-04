@@ -69,6 +69,7 @@ graph TD
 
     subgraph CP["Control Plane"]
         API["dnsdave-api  (Axum)\n:8080  ·  REST API  ·  Pi-hole shim"]
+        UI["dnsdave-ui  (SvelteKit)\n:3000  ·  Web UI  ·  SSE proxy"]
         SYNC["dnsdave-sync\nBlocklist downloader + parser"]
         LOG["dnsdave-log\nQuery log bulk writer"]
         STATS["dnsdave-stats\nIn-memory stats aggregator"]
@@ -79,6 +80,8 @@ graph TD
 
     Clients -->|"DNS UDP/TCP :53  ·  DoT :853"| DNS
     Clients -->|"DHCP :67  ·  DHCPv6 :547"| DHCP
+    Clients -->|"HTTPS :3000  ·  browser UI"| UI
+    UI -->|"REST + SSE proxy"| API
     DNS -->|"query events\nfire & forget · MessagePack"| NATS
     NATS -->|"config hot-swap · blocklist diffs\nbloom filters · runtime KV\nlease events → dynamic DNS"| DNS
     API -->|"config change events"| NATS
@@ -103,6 +106,7 @@ graph TD
 | `dnsdave-log` | Rust | Query log consumer. Bulk-writes to Postgres. | NATS + Postgres |
 | `dnsdave-stats` | Rust | Stats aggregator. Maintains in-memory counters. | NATS |
 | `dnsdave-dhcp` | **Rust** | DHCPv4/DHCPv6 server. Publishes lease events. Dynamic DNS via NATS. | NATS + Postgres |
+| `dnsdave-ui` | **TypeScript** (SvelteKit) | Web management UI. Proxies REST + SSE to `dnsdave-api`. No direct DB or NATS access. See `UI.md`. | `dnsdave-api` only |
 | `nats` | — | Event bus. Core pub/sub + JetStream + Object Store + KV Store. | — |
 | `postgres` | — | Primary persistent storage. | — |
 

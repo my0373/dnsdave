@@ -1,4 +1,4 @@
-# DNSDave — Product Design Document
+# DNSDave – Product Design Document
 
 **Version:** 0.4.0-draft  
 **Date:** 2026-04-04  
@@ -11,7 +11,7 @@
 Pi-hole is the de facto home DNS sinkhole, but it carries a decade of design constraints:
 
 - Configuration is file-based and requires SSH access or a purpose-built PHP UI.
-- No stable, documented REST API — automation is fragile and unsupported.
+- No stable, documented REST API – automation is fragile and unsupported.
 - Wildcard DNS records are not natively supported.
 - It is tightly coupled to a single-host systemd + dnsmasq stack, making HA or containerised deployments painful.
 - Blocklist management is monolithic; adding or removing lists requires a full gravity rebuild.
@@ -35,19 +35,19 @@ DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **even
 | G6 | Provide rich per-client, per-domain query logs with live streaming. |
 | G7 | Allow grouping of clients and applying different blocklist/allowlist policies per group. |
 | G8 | Be drop-in compatible with existing Pi-hole browser extensions and mobile apps that use the Pi-hole API. |
-| G9 | **Loose coupling via an event bus.** The DNS hot path offloads all side-effects asynchronously. New functionality is added by subscribing to the bus — zero changes to the DNS container. |
+| G9 | **Loose coupling via an event bus.** The DNS hot path offloads all side-effects asynchronously. New functionality is added by subscribing to the bus – zero changes to the DNS container. |
 | G10 | **First-class DHCPv4 and DHCPv6 server** with full RFC option support, static reservations, PXE boot, DHCP relay, and automatic DNS record registration on lease assignment. |
 | G11 | **Authoritative local DNS server** for any zone it owns. DNSDave answers authoritatively (AA flag set, SOA in authority section) for configured zones and never forwards those queries upstream. Supports zone transfers (AXFR/IXFR), NOTIFY to secondaries, and RFC 2136 dynamic updates. |
 | G12 | **Conditional DNS forwarding.** Named forward zones route queries for specific domains to designated upstream resolvers, bypassing the global upstream pool and the blocklist. Essential for VPN/corporate split-DNS, multi-site internal networks, and ISP-delegated zones. |
-| G13 | **DNSSEC support** at two levels: (a) *validation* — verify cryptographic signatures on responses from upstream resolvers and set the AD bit; (b) *signing* — sign owned zones with ZSK/KSK key pairs, serve DNSKEY/RRSIG/NSEC3 records, and expose DS records for delegation. |
+| G13 | **DNSSEC support** at two levels: (a) *validation* – verify cryptographic signatures on responses from upstream resolvers and set the AD bit; (b) *signing* – sign owned zones with ZSK/KSK key pairs, serve DNSKEY/RRSIG/NSEC3 records, and expose DS records for delegation. |
 | G14 | **Multi-architecture native binaries and container images.** Every container ships as a multi-arch manifest covering `linux/amd64`, `linux/arm64` (Raspberry Pi 3+ running 64-bit OS, Apple Silicon servers, AWS Graviton), and `linux/arm/v7` (Raspberry Pi 3+ running 32-bit OS). Development builds are supported on `macOS/arm64` (Apple Silicon) and `macOS/x86_64` without modification. |
-| G15 | **Pluggable observability export.** Logs, events, and metrics can be forwarded to any external system via a dedicated `dnsdave-export` container that subscribes to NATS and speaks the target system's native protocol — syslog (rsyslog, syslog-ng), OTLP (OpenTelemetry Collector → Grafana Loki/Tempo/Prometheus, Jaeger, Splunk, Datadog, New Relic, Honeycomb), Loki push API, InfluxDB line protocol, Elasticsearch, StatsD, and generic HTTP webhooks. Zero changes to existing containers. |
+| G15 | **Pluggable observability export.** Logs, events, and metrics can be forwarded to any external system via a dedicated `dnsdave-export` container that subscribes to NATS and speaks the target system's native protocol – syslog (rsyslog, syslog-ng), OTLP (OpenTelemetry Collector → Grafana Loki/Tempo/Prometheus, Jaeger, Splunk, Datadog, New Relic, Honeycomb), Loki push API, InfluxDB line protocol, Elasticsearch, StatsD, and generic HTTP webhooks. Zero changes to existing containers. |
 
 ### Non-Goals (v1)
 
 - Building a full recursive resolver (we forward upstream for non-local zones).
 - Automated DNSSEC key ceremony with HSM hardware (key operations are software-only via `ring`/`rcgen`).
-- `linux/arm/v6` (Raspberry Pi 1/Zero) — insufficient RAM and no hardware FPU for the blocklist data structures.
+- `linux/arm/v6` (Raspberry Pi 1/Zero) – insufficient RAM and no hardware FPU for the blocklist data structures.
 - A bundled web UI (the API is the product; a reference SPA can come later).
 
 ---
@@ -113,9 +113,9 @@ graph TD
 | `dnsdave-stats` | Rust | Stats aggregator. Maintains in-memory counters. | NATS |
 | `dnsdave-dhcp` | **Rust** | DHCPv4/DHCPv6 server. Publishes lease events. Dynamic DNS via NATS. | NATS + Postgres |
 | `dnsdave-ui` | **TypeScript** (SvelteKit) | Web management UI. Proxies REST + SSE to `dnsdave-api`. No direct DB or NATS access. See `UI.md`. | `dnsdave-api` only |
-| `dnsdave-export` | **Rust** | Pluggable observability exporter. Subscribes to all NATS event subjects and forwards to configured external backends. Zero Postgres access. Optional container — omit if no external export needed. | NATS only |
-| `nats` | — | Event bus. Core pub/sub + JetStream + Object Store + KV Store. | — |
-| `postgres` | — | Primary persistent storage. | — |
+| `dnsdave-export` | **Rust** | Pluggable observability exporter. Subscribes to all NATS event subjects and forwards to configured external backends. Zero Postgres access. Optional container – omit if no external export needed. | NATS only |
+| `nats` | - | Event bus. Core pub/sub + JetStream + Object Store + KV Store. | - |
+| `postgres` | - | Primary persistent storage. | - |
 
 ### 3.3 Key Design Principles
 
@@ -123,7 +123,7 @@ graph TD
 
 **The DNS container offloads all side-effects.** Query log writes, stats updates, dynamic DNS from DHCP leases, and any future integrations are downstream consumers of NATS subjects. The hot path fires a non-blocking NATS publish and moves on.
 
-**New functionality = new consumer.** Alerting, webhooks, InfluxDB export, SIEM integration — all are new containers subscribing to the bus. The DNS and API containers are never modified.
+**New functionality = new consumer.** Alerting, webhooks, InfluxDB export, SIEM integration – all are new containers subscribing to the bus. The DNS and API containers are never modified.
 
 ### 3.4 Supported Platforms
 
@@ -155,7 +155,7 @@ Every container ships as a **multi-arch manifest** so the same `docker pull` com
 | `ring` ECDSA/Ed25519 | ✓ | ✓ | ✓ |
 | 300 MB RSS target (full blocklist) | ✓ | ✓ | ✓ (within 1 GB) |
 
-SIMD paths are **runtime-detected** — the same binary runs on CPUs with and without AVX2/NEON extensions. No compile-time feature flags required for target-specific acceleration.
+SIMD paths are **runtime-detected** – the same binary runs on CPUs with and without AVX2/NEON extensions. No compile-time feature flags required for target-specific acceleration.
 
 ---
 
@@ -219,7 +219,7 @@ dnsdave.
 │
 ├── dnssec.
 │   ├── key.created.{zone_name}     # new ZSK or KSK generated
-│   ├── key.retired.{zone_name}     # key rollover — old key retired
+│   ├── key.retired.{zone_name}     # key rollover – old key retired
 │   └── zone.signed.{zone_name}     # full zone re-sign complete; DNS nodes re-fetch DNSKEY+RRSIGs
 │                                    # Delivery: JetStream (at-least-once)
 │
@@ -234,7 +234,7 @@ dnsdave.
 | `DNSDAVE_CONFIG` | `dnsdave.config.>` | All messages | Config replay for new/restarted DNS nodes |
 | `DNSDAVE_BLOCKLIST` | `dnsdave.blocklist.>` | Last per subject | Blocklist diff replay |
 | `DNSDAVE_DHCP` | `dnsdave.dhcp.lease.>` | 90 days | Lease history; replayed by DNS nodes for dynamic record state |
-| `DNSDAVE_ZONES` | `dnsdave.zone.>` | All messages | Zone / SOA state replay — new DNS nodes self-bootstrap zone authority and serial state |
+| `DNSDAVE_ZONES` | `dnsdave.zone.>` | All messages | Zone / SOA state replay – new DNS nodes self-bootstrap zone authority and serial state |
 | `DNSDAVE_DNSSEC` | `dnsdave.dnssec.>` | All messages | DNSSEC key lifecycle events; zone re-sign notifications |
 | `DNSDAVE_QUERYLOG` | `dnsdave.query.>` | 24h rolling | Audit / log writer catch-up |
 
@@ -304,7 +304,7 @@ sequenceDiagram
     Note over DNS: Publish dnsdave.query.* per query
 ```
 
-### 4.8 Extensibility — Adding New Consumers
+### 4.8 Extensibility – Adding New Consumers
 
 | Future feature | New consumer subscribes to |
 |---------------|---------------------------|
@@ -322,7 +322,7 @@ sequenceDiagram
 
 Performance is a first-class design constraint. Every decision in this section targets matching or exceeding Pi-hole FTL's query throughput while operating entirely in user-space Rust.
 
-### 5.1 Hot Path — Query Lifecycle
+### 5.1 Hot Path – Query Lifecycle
 
 Every DNS query follows this chain. Each stage must not allocate and must complete in nanoseconds:
 
@@ -342,7 +342,7 @@ flowchart TD
     G -->|"not in any owned zone"| FZ{"7  Forward zone check\nArcSwap table"}
     FZ -->|"in forward zone"| FZC{"7a  Answer cache\nhit?"}
     FZC -->|hit| R7a(["Return cached answer\nPublish QueryEvent → NATS"])
-    FZC -->|miss| FZU["7b  Forward to zone-specific\nupstream(s) — bypass blocklist\nDNSSEC validate if enabled"]
+    FZC -->|miss| FZU["7b  Forward to zone-specific\nupstream(s) – bypass blocklist\nDNSSEC validate if enabled"]
     FZU --> R7b(["Cache answer · Return\nPublish QueryEvent → NATS"])
     FZ -->|"not in any forward zone"| H{"8  Bloom filter\nnegative?"}
     H -->|"negative\nguaranteed not blocked"| J
@@ -354,16 +354,16 @@ flowchart TD
     K --> L(["Cache answer · Encode response\nPublish QueryEvent → NATS\nReturn buffer"])
 ```
 
-All NATS publishes are **non-blocking writes to the async-nats client buffer** — no syscall, no network boundary on the hot path.
+All NATS publishes are **non-blocking writes to the async-nats client buffer** – no syscall, no network boundary on the hot path.
 
 **Critical semantics:**
-- **Step 6** — Owned zones never leak to upstream. Missing records return authoritative NXDOMAIN (AA=1, SOA in authority section).
-- **Step 7** — Forward zones bypass the blocklist entirely. If a name falls in a configured forward zone, it goes to that zone's designated resolver(s), not the global pool. The answer cache is still consulted first (step 7a) to avoid redundant upstream calls.
-- **Step 11** — When DNSSEC validation is enabled, the DO (DNSSEC OK) bit is set on upstream queries. Validated responses have the AD (Authentic Data) bit set in the reply; signature failures return SERVFAIL.
+- **Step 6** – Owned zones never leak to upstream. Missing records return authoritative NXDOMAIN (AA=1, SOA in authority section).
+- **Step 7** – Forward zones bypass the blocklist entirely. If a name falls in a configured forward zone, it goes to that zone's designated resolver(s), not the global pool. The answer cache is still consulted first (step 7a) to avoid redundant upstream calls.
+- **Step 11** – When DNSSEC validation is enabled, the DO (DNSSEC OK) bit is set on upstream queries. Validated responses have the AD (Authentic Data) bit set in the reply; signature failures return SERVFAIL.
 
-### 5.2 UDP I/O — Multi-Socket with SO_REUSEPORT
+### 5.2 UDP I/O – Multi-Socket with SO_REUSEPORT
 
-N Tokio tasks (one per CPU core) each own a UDP socket bound to `:53` with `SO_REUSEPORT`. The kernel distributes packets across sockets via consistent hash of source IP + port — no userspace lock on the receive path.
+N Tokio tasks (one per CPU core) each own a UDP socket bound to `:53` with `SO_REUSEPORT`. The kernel distributes packets across sockets via consistent hash of source IP + port – no userspace lock on the receive path.
 
 | Platform | Batch I/O | `SO_REUSEPORT` |
 |----------|-----------|----------------|
@@ -383,7 +383,7 @@ All byte buffers are managed through `sync.Pool`-equivalent Tokio channels. Two 
 
 ### 5.4 Lock-Free Data Structures (Rust)
 
-All hot-path lookups use `ArcSwap` — readers load an Arc with a single atomic instruction. Writers do full copy-on-write in the background, then call `ArcSwap::store()`. No locks, no waits on the query path.
+All hot-path lookups use `ArcSwap` – readers load an Arc with a single atomic instruction. Writers do full copy-on-write in the background, then call `ArcSwap::store()`. No locks, no waits on the query path.
 
 | Structure | Rust type | Update strategy |
 |-----------|-----------|-----------------|
@@ -392,19 +392,19 @@ All hot-path lookups use `ArcSwap` — readers load an Arc with a single atomic 
 | Allowlist set | `ArcSwap<HashSet<DomainKey>>` | Swap on config event |
 | Local records map | `ArcSwap<HashMap<DomainKey, Vec<Record>>>` | Swap on config or DHCP lease event |
 | Wildcard trie | `ArcSwap<LabelTrie>` | Swap on config event |
-| Zone authority trie | `ArcSwap<ZoneTrie>` | Swap on `dnsdave.zone.*` config event — holds SOA per zone |
-| Forward zone table | `ArcSwap<ForwardZoneTable>` | Swap on `dnsdave.config.forwardzone.*` event — suffix-matched; holds upstream list + DNSSEC policy per zone |
+| Zone authority trie | `ArcSwap<ZoneTrie>` | Swap on `dnsdave.zone.*` config event – holds SOA per zone |
+| Forward zone table | `ArcSwap<ForwardZoneTable>` | Swap on `dnsdave.config.forwardzone.*` event – suffix-matched; holds upstream list + DNSSEC policy per zone |
 
 ### 5.5 Blocklist In-Memory Layout
 
-**Stage 1 — Bloom filter:** `k=10` xxHash3 functions; FPR ~0.001% at 5M domains; ~90MB. A negative is definitive — no further lookup needed.
+**Stage 1 – Bloom filter:** `k=10` xxHash3 functions; FPR ~0.001% at 5M domains; ~90MB. A negative is definitive – no further lookup needed.
 
-**Stage 2 — Minimal Perfect Hash map:** `boomphf` eliminates all collisions. ~3 bits/entry; 5M domains ≈ 42MB. The map is immutable after construction — Go's map has no synchronisation overhead: reads are concurrent-safe because the map is never mutated.
+**Stage 2 – Minimal Perfect Hash map:** `boomphf` eliminates all collisions. ~3 bits/entry; 5M domains ≈ 42MB. The map is immutable after construction – Go's map has no synchronisation overhead: reads are concurrent-safe because the map is never mutated.
 
-### 5.6 Blocklist Parser — Streaming, Zero-Copy
+### 5.6 Blocklist Parser – Streaming, Zero-Copy
 
 - Stream-read HTTP response body; transparent gzip/zstd decompression.
-- `memchr` crate SIMD-accelerated newline scanning — AVX2 on `x86_64`, NEON on `arm64`, NEON (32-bit) on `arm/v7`; scalar fallback auto-selected at runtime on CPUs lacking SIMD extensions.
+- `memchr` crate SIMD-accelerated newline scanning – AVX2 on `x86_64`, NEON on `arm64`, NEON (32-bit) on `arm/v7`; scalar fallback auto-selected at runtime on CPUs lacking SIMD extensions.
 - In-place lowercase via 256-byte lookup table; no regex; no per-line allocation.
 - Multiple lists fetched and parsed concurrently with Tokio tasks.
 
@@ -412,9 +412,9 @@ All hot-path lookups use `ArcSwap` — readers load an Arc with a single atomic 
 |------|------|--------|
 | StevenBlack unified | ~160K domains | <200ms |
 | OISD big | ~1M domains | <1s |
-| All lists combined (5M unique) | — | <3s cold; <1s incremental |
+| All lists combined (5M unique) | - | <3s cold; <1s incremental |
 
-### 5.7 Answer Cache — moka
+### 5.7 Answer Cache – moka
 
 `moka` concurrent cache with Window TinyLFU policy, internally sharded. TTL-aware eviction; negative caching (NXDOMAIN/NODATA per RFC 2308); cache pre-warming from `DNSDAVE_QUERYLOG` replay on startup.
 
@@ -468,14 +468,14 @@ DoH upstreams use persistent HTTP/2 connections (one per upstream, multiplexed).
 
 ### 6.5 Local Zone Management
 
-DNSDave can be the **authoritative primary** (or secondary) DNS server for any zone, allowing it to act as a full local DNS server — not just a forwarder. This is distinct from simple local records: zones give DNSDave authority over an entire namespace with proper RFC-compliant semantics.
+DNSDave can be the **authoritative primary** (or secondary) DNS server for any zone, allowing it to act as a full local DNS server – not just a forwarder. This is distinct from simple local records: zones give DNSDave authority over an entire namespace with proper RFC-compliant semantics.
 
 #### Zone Configuration
 
 ```jsonc
 // POST /api/v1/dns/zones
 {
-  "name":    "home.arpa",          // RFC 8375 — canonical home network zone
+  "name":    "home.arpa",          // RFC 8375 – canonical home network zone
   "type":    "primary",            // "primary" | "secondary"
   "ttl":     300,                  // default record TTL
   "soa": {
@@ -512,8 +512,8 @@ Every mutation to records within a zone (via REST API, DHCP DDNS, or RFC 2136) a
 
 | Protocol | Description |
 |----------|-------------|
-| AXFR | Full zone transfer — streams all records in the zone |
-| IXFR | Incremental transfer — streams only records changed since a given serial, sourced from `dns_zone_changes` |
+| AXFR | Full zone transfer – streams all records in the zone |
+| IXFR | Incremental transfer – streams only records changed since a given serial, sourced from `dns_zone_changes` |
 
 #### NOTIFY
 
@@ -523,9 +523,9 @@ On every serial increment, `dnsdave-dns` sends RFC 1996 NOTIFY packets to all co
 
 DNSDave accepts DNS UPDATE packets (RFC 2136) on port 53/TCP. This standard protocol is used by:
 
-- **certbot / ACME DNS-01** — automatic certificate issuance
-- **Kubernetes ExternalDNS** (webhook or RFC 2136 mode) — register service IPs
-- **Kea DHCP** DDNS — register non-dnsdave clients
+- **certbot / ACME DNS-01** – automatic certificate issuance
+- **Kubernetes ExternalDNS** (webhook or RFC 2136 mode) – register service IPs
+- **Kea DHCP** DDNS – register non-dnsdave clients
 - **Ansible / Terraform** DNS modules
 
 Updates are validated against `allow_update` CIDRs, translated to the same record-write path as the REST API, and published to `dnsdave.zone.serial.updated` on NATS so all nodes see the change within milliseconds.
@@ -540,7 +540,7 @@ A planned optional module bridges mDNS/Bonjour announcements (multicast `224.0.0
 
 ### 6.6 Conditional DNS Forwarding
 
-A **forward zone** routes queries for a specific domain suffix to a designated set of upstream resolvers, bypassing both the global upstream pool and the blocklist. This is distinct from an owned zone (where DNSDave is authoritative) — in a forward zone, DNSDave acts as a proxy to the named servers and caches their responses.
+A **forward zone** routes queries for a specific domain suffix to a designated set of upstream resolvers, bypassing both the global upstream pool and the blocklist. This is distinct from an owned zone (where DNSDave is authoritative) – in a forward zone, DNSDave acts as a proxy to the named servers and caches their responses.
 
 ```jsonc
 // POST /api/v1/dns/forwardzones
@@ -565,7 +565,7 @@ Typical forward zone use cases:
 | `consul` | `127.0.0.1:8600` | Consul service discovery |
 | `.` (catch-all) | Custom upstream pool | Override the global upstream for all non-local queries |
 
-**Hot path behavior (step 7):** Forward zone lookup uses a right-to-left label trie (same structure as the zone authority trie, stored in `ArcSwap<ForwardZoneTable>`). Longest suffix wins. The answer cache is checked first (step 7a) before the network call (step 7b). Forward zone responses are cached with normal TTL.
+**Hot path behaviour (step 7):** Forward zone lookup uses a right-to-left label trie (same structure as the zone authority trie, stored in `ArcSwap<ForwardZoneTable>`). Longest suffix wins. The answer cache is checked first (step 7a) before the network call (step 7b). Forward zone responses are cached with normal TTL.
 
 **Blocklist bypass:** Queries routed through a forward zone skip the Bloom filter and Blocklist HashMap. If per-forward-zone blocklisting is required, it must be enforced by the target resolver.
 
@@ -678,7 +678,7 @@ A `/api/pihole/` shim in `dnsdave-api` exposes the Pi-hole v5/v6 admin API surfa
 
 ### 8.1 Overview
 
-`dnsdave-dhcp` is a first-class DHCPv4 and DHCPv6 server integrated with the DNS data plane via NATS JetStream. When a lease is assigned, DNS `A`/`AAAA` and `PTR` records are automatically created in all `dnsdave-dns` instances — no manual registration, no polling. Releasing or expiring a lease removes the records.
+`dnsdave-dhcp` is a first-class DHCPv4 and DHCPv6 server integrated with the DNS data plane via NATS JetStream. When a lease is assigned, DNS `A`/`AAAA` and `PTR` records are automatically created in all `dnsdave-dns` instances – no manual registration, no polling. Releasing or expiring a lease removes the records.
 
 ### 8.2 Protocol Support
 
@@ -686,10 +686,10 @@ A `/api/pihole/` shim in `dnsdave-api` exposes the Pi-hole v5/v6 admin API surfa
 |----------|--------------|-----------|
 | DHCPv4 | DISCOVER → OFFER → REQUEST → ACK/NAK (DORA) | UDP :67 broadcast + unicast |
 | DHCPv6 | SOLICIT → ADVERTISE → REQUEST → REPLY (SARR) | UDP :547 multicast + unicast |
-| DHCPv6 IA_NA | Non-temporary address assignment | — |
-| DHCPv6 IA_PD | Prefix delegation | — |
-| PXE (BIOS + UEFI) | Auto-detection via option 93 | — |
-| DHCP Relay | RFC 3046 giaddr + option 82 | — |
+| DHCPv6 IA_NA | Non-temporary address assignment | - |
+| DHCPv6 IA_PD | Prefix delegation | - |
+| PXE (BIOS + UEFI) | Auto-detection via option 93 | - |
+| DHCP Relay | RFC 3046 giaddr + option 82 | - |
 
 ### 8.3 Scopes and Pools
 
@@ -724,7 +724,7 @@ Reservation options
             > Global options
 ```
 
-This allows precise targeting — Cisco switches in scope `LAN` get option 66 (TFTP server); all other clients in the same scope do not.
+This allows precise targeting – Cisco switches in scope `LAN` get option 66 (TFTP server); all other clients in the same scope do not.
 
 ### 8.5 Supported DHCPv4 Options
 
@@ -760,8 +760,8 @@ All standard RFC options are supported. Key options with first-class handling:
 | Code | Name | Notes |
 |------|------|-------|
 | 23 | DNS Recursive Name Server | Auto-set to `dnsdave-dns` IPv6 if not overridden |
-| 24 | Domain Search List | — |
-| 31 | SNTP Servers | — |
+| 24 | Domain Search List | - |
+| 31 | SNTP Servers | - |
 | 56 | NTP Server | RFC 5908 |
 | 59 | Boot File URL | PXEv6 |
 | 60 | Boot File Parameters | PXEv6 arguments |
@@ -979,8 +979,8 @@ struct LeaseEvent {
 
 ### 9.4 Live Streams
 
-`GET /api/v1/logs/stream` — SSE; subscribes to `dnsdave.query.*` in NATS. Zero Postgres reads.  
-`GET /api/v1/dhcp/leases/stream` — SSE; subscribes to `dnsdave.dhcp.lease.*` in NATS. Live lease activity.
+`GET /api/v1/logs/stream` – SSE; subscribes to `dnsdave.query.*` in NATS. Zero Postgres reads.  
+`GET /api/v1/dhcp/leases/stream` – SSE; subscribes to `dnsdave.dhcp.lease.*` in NATS. Live lease activity.
 
 ---
 
@@ -1251,14 +1251,14 @@ CREATE INDEX idx_dhcp_leases_scope    ON dhcp_leases(scope_id);
 
 | Structure | Rust Type | Source | Includes |
 |-----------|-----------|--------|---------|
-| Bloom filter | `ArcSwap<BloomFilter>` | NATS Object Store | — |
-| Blocklist MPHF map | `ArcSwap<BoomPHF<DomainKey>>` | NATS Object Store / diff replay | — |
-| Allowlist set | `ArcSwap<HashSet<DomainKey>>` | NATS KV | — |
+| Bloom filter | `ArcSwap<BloomFilter>` | NATS Object Store | - |
+| Blocklist MPHF map | `ArcSwap<BoomPHF<DomainKey>>` | NATS Object Store / diff replay | - |
+| Allowlist set | `ArcSwap<HashSet<DomainKey>>` | NATS KV | - |
 | Local records map | `ArcSwap<HashMap<DomainKey, Vec<Record>>>` | NATS JetStream replay | Manual records + DHCP lease records |
-| Wildcard trie | `ArcSwap<LabelTrie>` | NATS JetStream replay | — |
-| Client CIDR table | `ArcSwap<Vec<(IpNet, ClientId)>>` | NATS KV | — |
-| Answer cache | `moka::Cache<CacheKey, CachedAnswer>` | Local upstream queries | — |
-| Query event ring buffer | Lock-free MPSC | NATS fallback | — |
+| Wildcard trie | `ArcSwap<LabelTrie>` | NATS JetStream replay | - |
+| Client CIDR table | `ArcSwap<Vec<(IpNet, ClientId)>>` | NATS KV | - |
+| Answer cache | `moka::Cache<CacheKey, CachedAnswer>` | Local upstream queries | - |
+| Query event ring buffer | Lock-free MPSC | NATS fallback | - |
 
 **Memory sizing (5M-domain blocklist + 500 DHCP leases):**
 
@@ -1618,12 +1618,12 @@ Every container exposes a Prometheus scrape endpoint. Grafana, VictoriaMetrics, 
 |--------|------|--------|
 | `dnsdave_dns_queries_total` | Counter | `response_type`, `qtype` |
 | `dnsdave_dns_query_duration_us` | Histogram | `response_type` |
-| `dnsdave_dns_blocked_total` | Counter | — |
-| `dnsdave_dns_cache_hits_total` | Counter | — |
-| `dnsdave_dns_bloom_false_positives_total` | Counter | — |
-| `dnsdave_dns_nats_publish_errors_total` | Counter | — |
+| `dnsdave_dns_blocked_total` | Counter | - |
+| `dnsdave_dns_cache_hits_total` | Counter | - |
+| `dnsdave_dns_bloom_false_positives_total` | Counter | - |
+| `dnsdave_dns_nats_publish_errors_total` | Counter | - |
 | `dnsdave_dns_forward_zone_hits_total` | Counter | `zone` |
-| `dnsdave_dns_dnssec_validation_failures_total` | Counter | — |
+| `dnsdave_dns_dnssec_validation_failures_total` | Counter | - |
 
 **dnsdave-dhcp** (`:9093/metrics`):
 
@@ -1691,11 +1691,11 @@ The container runtime's logging driver handles routing stdout to external collec
 | `dnsdave-export` | `:9094/health` | NATS connected, ≥1 backend reachable |
 | `nats` | `:8222/healthz` | Built-in |
 
-### 12.5 Export Architecture — `dnsdave-export`
+### 12.5 Export Architecture – `dnsdave-export`
 
 `dnsdave-export` is an **optional, stateless** container that subscribes to all NATS event subjects and forwards events to one or more configured backends. It is the single seam between DNSDave's internal event bus and any external observability system.
 
-**Design principle:** `dnsdave-export` never touches the database. All data it exports comes from NATS. Adding a new export destination requires only a new backend configuration block — zero changes to any other container.
+**Design principle:** `dnsdave-export` never touches the database. All data it exports comes from NATS. Adding a new export destination requires only a new backend configuration block – zero changes to any other container.
 
 ```mermaid
 flowchart LR
@@ -1737,7 +1737,7 @@ flowchart LR
 `dnsdave-export` is configured via `DNSDAVE_EXPORT_CONFIG` (path to a TOML/YAML file) or environment variables. Multiple backends can be active simultaneously.
 
 ```toml
-# export.toml — example: syslog + Loki + InfluxDB all at once
+# export.toml – example: syslog + Loki + InfluxDB all at once
 
 [backends.syslog]
 enabled  = true
@@ -1784,7 +1784,7 @@ enabled  = true
 address  = "telegraf:8125"
 protocol = "udp"
 prefix   = "dnsdave"
-# Metrics only — emits counters and gauges from query/dhcp events
+# Metrics only – emits counters and gauges from query/dhcp events
 ```
 
 ### 12.7 Supported Destinations
@@ -1815,7 +1815,7 @@ if $programname == 'dnsdave' then {
 }
 ```
 
-**CEF format** (for SIEM compatibility — ArcSight, QRadar) is also supported by setting `format = "cef"`:
+**CEF format** (for SIEM compatibility – ArcSight, QRadar) is also supported by setting `format = "cef"`:
 ```
 CEF:0|DNSDave|dnsdave-dns|0.1|DNS_QUERY|DNS Query Processed|3|
   src=192.168.1.50 dhost=example.com cat=allowed rt=1712238181842
@@ -1825,7 +1825,7 @@ CEF:0|DNSDave|dnsdave-dns|0.1|DNS_QUERY|DNS Query Processed|3|
 
 Two integration paths:
 
-**Path 1 — Docker log driver → Logstash** (simplest, no `dnsdave-export` needed):
+**Path 1 – Docker log driver → Logstash** (simplest, no `dnsdave-export` needed):
 ```yaml
 # docker-compose.yml
 services:
@@ -1837,7 +1837,7 @@ services:
         tag: "dnsdave-dns"
 ```
 
-**Path 2 — `dnsdave-export` → Elasticsearch bulk API** (richer, structured):
+**Path 2 – `dnsdave-export` → Elasticsearch bulk API** (richer, structured):
 ```toml
 [backends.elasticsearch]
 enabled  = true
@@ -1861,12 +1861,12 @@ Grafana is the recommended full-stack observability destination:
 | **Tempo** (traces) | `dnsdave-export` → OTLP | OTel Collector → Tempo |
 
 Pre-built Grafana dashboards are shipped in `deploy/grafana/dashboards/`:
-- `dns-overview.json` — QPS, block rate, cache hit ratio, p99 latency
-- `dhcp-leases.json` — pool utilisation gauges, lease events, active count
-- `dns-query-explorer.json` — Loki-powered query log with client and domain filters
-- `cluster-health.json` — per-node QPS sparklines, NATS health, Postgres lag
-- `blocklist-sync.json` — list sizes over time, sync durations, error rates
-- `dnssec-keys.json` — key expiry countdown, signing events
+- `dns-overview.json` – QPS, block rate, cache hit ratio, p99 latency
+- `dhcp-leases.json` – pool utilisation gauges, lease events, active count
+- `dns-query-explorer.json` – Loki-powered query log with client and domain filters
+- `cluster-health.json` – per-node QPS sparklines, NATS health, Postgres lag
+- `blocklist-sync.json` – list sizes over time, sync durations, error rates
+- `dnssec-keys.json` – key expiry countdown, signing events
 
 **Docker Compose with full Grafana stack:**
 ```yaml
@@ -2054,7 +2054,7 @@ enum EventPayload {
 | Unauthenticated DNS | Standard; API always requires key/JWT |
 | Unauthenticated DHCP | Standard protocol; rogue server protection via NATS leader election (only one active DHCP server per broadcast domain) |
 | API key storage | Argon2id-hashed at rest; never logged |
-| DoT/DoH TLS | ACME auto-provisioned (public domains) or local CA (private deployments) — see §13.1 |
+| DoT/DoH TLS | ACME auto-provisioned (public domains) or local CA (private deployments) – see §13.1 |
 | NATS auth | Per-container NKey credentials; deny-all default ACLs; TLS on all NATS connections |
 | DHCP option injection | Options stored as typed values; raw hex only for explicitly declared custom codes |
 | Rate limiting | Per-client DNS token bucket; API token bucket; DHCP DISCOVER rate limit per MAC |
@@ -2150,7 +2150,7 @@ dns_rfc2136_secret  = <TSIG key or leave empty if IP-based allow_update>
 dns_rfc2136_algorithm = HMAC-SHA256
 ```
 
-This works for any service running in the local environment: Nginx, Proxmox, Home Assistant, Kubernetes Ingress, etc. The cert is issued by Let's Encrypt (real, browser-trusted) because the ACME CA only validates that the TXT record exists at the DNS level — it doesn't care whether the server is publicly reachable.
+This works for any service running in the local environment: Nginx, Proxmox, Home Assistant, Kubernetes Ingress, etc. The cert is issued by Let's Encrypt (real, browser-trusted) because the ACME CA only validates that the TXT record exists at the DNS level – it doesn't care whether the server is publicly reachable.
 
 **Requirement:** The zone (`home.arpa`) must be publicly delegated to DNSDave, OR the ACME CA must be an internal CA that trusts it. For truly private zones (`home.arpa` is never publicly delegated), only an internal ACME CA (e.g., Step CA, Smallstep, HashiCorp Vault) will work. Let's Encrypt cannot validate a zone that has no public NS delegation.
 
@@ -2158,7 +2158,7 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 
 ## 14. Milestones
 
-### v0.1 — Core DNS + event bus foundations
+### v0.1 – Core DNS + event bus foundations
 - [ ] `dnsdave-dns`: Rust, SO_REUSEPORT, UDP, forward-only resolver
 - [ ] `dnsdave-api`: REST API skeleton, Postgres, config CRUD
 - [ ] NATS JetStream + KV store configured
@@ -2168,7 +2168,7 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] `docker-compose.yml` reference stack
 - [ ] Benchmark suite baseline
 
-### v0.2 — Blocklist ecosystem
+### v0.2 – Blocklist ecosystem
 - [ ] All list formats (adblock, domain-only, RPZ)
 - [ ] MPHF blocklist map (`boomphf`) + Bloom filter hot-swap
 - [ ] Bloom filter → NATS Object Store; DNS hot-swap
@@ -2177,13 +2177,13 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] Groups + per-group blocklist policy
 - [ ] Pi-hole API shim (v5)
 
-### v0.3 — Advanced DNS + Local Zone Authority + Forwarding
+### v0.3 – Advanced DNS + Local Zone Authority + Forwarding
 - [ ] Wildcard records + copy-on-write label trie
 - [ ] CNAME chaining, PTR, split-horizon views
 - [ ] DoT + DoH upstream with HTTP/2 connection pooling
 - [ ] Negative caching; cache pre-warming from JetStream replay
 - [ ] Zone management (`dns_zones` table, SOA, NS records)
-- [ ] Zone authority check in hot path — authoritative NXDOMAIN + SOA for owned zones
+- [ ] Zone authority check in hot path – authoritative NXDOMAIN + SOA for owned zones
 - [ ] `ZoneTrie` ArcSwap structure; `DNSDAVE_ZONES` JetStream stream
 - [ ] AXFR (full zone transfer) served over TCP port 53
 - [ ] IXFR (incremental zone transfer) from `dns_zone_changes` log
@@ -2196,7 +2196,7 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] `/api/v1/dns/forwardzones/` CRUD; `dnsdave.config.forwardzone.*` NATS events
 - [ ] Per-forward-zone DNSSEC validation policy (strict / opportunistic / disabled)
 
-### v0.4 — Production readiness + TLS + DNSSEC validation
+### v0.4 – Production readiness + TLS + DNSSEC validation
 - [ ] DoT listener (:853) + DoH listener (:8080/dns-query)
 - [ ] Self-signed cert bootstrap via `rcgen` on first start (no manual config required)
 - [ ] ACME client (`instant-acme`) for public domain certificate issuance via DNS-01 over RFC 2136
@@ -2214,16 +2214,16 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] DNSSEC-aware negative caching (NSEC/NSEC3 validation)
 - [ ] Global `dnssec_validate` setting + per-upstream override
 
-### v0.4.5 — DNSSEC signing
+### v0.4.5 – DNSSEC signing
 - [ ] ZSK + KSK generation (Ed25519 / ECDSA P-384) via `ring` crate
 - [ ] Private key encrypted storage in Postgres (`DNSDAVE_SECRET_KEY`)
 - [ ] Inline zone signing: RRSIG regeneration on every record write
 - [ ] NSEC3 records with 0 iterations, empty salt (RFC 9276)
-- [ ] `GET /api/v1/dns/dnssec/zones/:name/ds` — DS record export
+- [ ] `GET /api/v1/dns/dnssec/zones/:name/ds` – DS record export
 - [ ] ZSK pre-publish rollover (automated via NATS KV key lifecycle)
 - [ ] `dnsdave.dnssec.*` NATS events; `DNSDAVE_DNSSEC` JetStream stream
 
-### v0.5 — Observability export
+### v0.5 – Observability export
 
 - [ ] `dnsdave-export` container: NATS subscriber, fan-out to configured backends
 - [ ] Syslog backend (RFC 5424 + RFC 3164 + CEF) over UDP and TCP; rsyslog/syslog-ng compatible
@@ -2239,7 +2239,7 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] Reference `docker-compose.grafana.yml` with Prometheus + Loki + Grafana + OTel Collector
 - [ ] `dnsdave-export` multi-arch container image (same targets as other containers)
 
-### v0.6 — DHCP
+### v0.6 – DHCP
 - [ ] `dnsdave-dhcp`: DHCPv4 DORA state machine, scope management, static reservations
 - [ ] Full DHCPv4 option suite (codes 1–252; raw hex for custom codes)
 - [ ] Client class matching + vendor-specific option delivery
@@ -2253,14 +2253,14 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] Dual-stack: A + AAAA + PTR dynamic registration
 - [ ] DHCP Prometheus metrics + pool utilisation gauges
 
-### v0.6 — Multi-node HA + scalability
+### v0.6 – Multi-node HA + scalability
 - [ ] `dnsdave-dns` horizontal scale (N nodes, independent NATS subscribers)
 - [ ] NATS JetStream 3-node cluster
 - [ ] Leader election for `dnsdave-sync`, `dnsdave-stats`, `dnsdave-dhcp` via NATS KV
 - [ ] Postgres Patroni HA; active-active DNS with keepalived/VRRP
 - [ ] Pi-hole API shim (v6)
 
-### v1.0 — Multi-region
+### v1.0 – Multi-region
 - [ ] Multi-region anycast (BGP)
 - [ ] Postgres logical replication cross-region
 - [ ] Per-region NATS cluster with leaf node federation
@@ -2328,25 +2328,25 @@ All containers are Rust for consistency. `dhcproto` covers DHCPv4 and DHCPv6 wit
 
 ## 16. Open Questions
 
-1. **Web UI scope** — API-only for v1, or ship a minimal read-only Svelte dashboard subscribing to SSE streams?
-2. **RPZ as output** — Serve RPZ zones to downstream resolvers by consuming `dnsdave.blocklist.*`? (Note: DNSDave can already ingest RPZ format. Serving RPZ to downstream resolvers is a separate feature.)
-3. **DoH port** — Serve DoH on `:8080/dns-query` (shared with API) or dedicated `:443`?
-4. **Multi-tenancy** — First-class namespace/org concept for SaaS, or single-tenant-per-instance?
-5. **`dnsdave-stats` persistence** — In-memory only (lost on restart) or checkpoint to NATS KV periodically?
-6. **NATS vs Redpanda at scale** — Benchmark trigger: >500K QPS sustained for >1 hour.
-7. **Bloom filter fetch at startup** — 90MB bloom filter is ~700 NATS Object Store chunks. Benchmark fetch + reassemble time vs. direct Postgres read. If Postgres is faster, use it only for startup and NATS only for live updates.
-8. **DHCP HA across broadcast domains** — In a multi-site Kubernetes deployment, each node needs a DHCP server on its local broadcast domain. DaemonSet is the right primitive, but leader election must be per-node, not cluster-wide. Design the NATS KV lock key as `dhcp.leader.{node_name}`.
-9. **DHCPv6 prefix delegation (IA_PD)** — For ISP-style deployments where `dnsdave-dhcp` delegates IPv6 prefixes to customer routers. Scope for v0.5 or push to v1?
-10. **RFC 2136 TSIG auth** — DNS UPDATE packets can be authenticated with TSIG (HMAC-MD5 / HMAC-SHA256). Should this be required for RFC 2136 updates, or is IP-CIDR (`allow_update`) sufficient for v0.3?
-11. **mDNS unicast bridge** — Is the mDNS→unicast bridge in scope for v0.6, or only if there is user demand? Requires binding a multicast socket which may conflict with host mDNS daemons (avahi, mDNSResponder).
-12. **Secondary zone bootstrapping** — For `zone_type = secondary`, DNSDave must initiate an initial AXFR from the primary on zone creation. Which TCP connection pool handles this (reuse `dnsdave-dns` or a dedicated worker)?
-13. **Forward zone blocklisting** — Should forward zones optionally apply the local blocklist before forwarding (for filtering ads even on corporate DNS)? Or keep the bypass unconditional for simplicity?
-14. **DNSSEC validation and Pi-hole compatibility** — Pi-hole extensions and mobile apps send DNS queries directly; they don't set the DO bit. With strict DNSSEC validation enabled, should dnsdave-dns only validate its own upstream queries, or also re-validate queries that clients request validation for (CD bit)?
-15. **DNSSEC key rollover automation** — ZSK rollover requires coordinated publish→activate→retire phases over days. Should this be managed by a cron-style job within `dnsdave-api`, or a dedicated `dnsdave-keymgr` sidecar subscribed to NATS?
-16. **Trust anchor automatic updates** — The IANA root KSK rolls every ~5 years (next: ~2026). Should DNSDave fetch the current root trust anchor from IANA's XML feed automatically, or require manual operator action?
-17. **Local CA vs external CA for private deployments** — For home labs with no public NS delegation, the ACME DNS-01 flow requires a private ACME CA (Step CA, Vault PKI, etc.). Should DNSDave ship with an embedded minimal ACME CA, or document how to integrate with an external one? Shipping one adds significant scope but removes a dependency.
-18. **Certificate SAN coverage** — DoT/DoH clients validate the server certificate hostname. In multi-node deployments (multiple `dnsdave-dns` instances), each node needs a cert that covers its individual hostname AND the shared DNS service name. Should certs use a wildcard SAN, or per-node issuance?
-19. **ACME DNS-01 for split-horizon zones** — If the zone exists only locally (no public NS delegation), Let's Encrypt cannot validate DNS-01 challenges. Should DNSDave detect this case and warn the operator, or automatically fall back to self-signed?
-20. **`dnsdave-export` back-pressure** — If a backend (e.g., Logstash, remote Loki) is slow or down, NATS JetStream consumer ACK delay will build up. Should `dnsdave-export` use a bounded in-memory queue per backend with drop-oldest semantics, or block ACK and let JetStream naturally slow the consumer? The latter risks head-of-line blocking for other subjects on the same consumer.
-21. **Export schema versioning** — As new event types or fields are added, how should backward compatibility be maintained for external consumers that have dashboards or parser rules built against the schema? Versioned `event_schema_version` field in every envelope, with a compatibility matrix doc?
-22. **Syslog TLS (RELP/RFC 5425)** — For production deployments where syslog traffic must be encrypted (PCI-DSS, HIPAA). `dnsdave-export` should support TLS-wrapped TCP syslog (RFC 5425) and optionally RELP. Is this in scope for v0.5 or a follow-up?
+1. **Web UI scope** – API-only for v1, or ship a minimal read-only Svelte dashboard subscribing to SSE streams?
+2. **RPZ as output** – Serve RPZ zones to downstream resolvers by consuming `dnsdave.blocklist.*`? (Note: DNSDave can already ingest RPZ format. Serving RPZ to downstream resolvers is a separate feature.)
+3. **DoH port** – Serve DoH on `:8080/dns-query` (shared with API) or dedicated `:443`?
+4. **Multi-tenancy** – First-class namespace/org concept for SaaS, or single-tenant-per-instance?
+5. **`dnsdave-stats` persistence** – In-memory only (lost on restart) or checkpoint to NATS KV periodically?
+6. **NATS vs Redpanda at scale** – Benchmark trigger: >500K QPS sustained for >1 hour.
+7. **Bloom filter fetch at startup** – 90MB bloom filter is ~700 NATS Object Store chunks. Benchmark fetch + reassemble time vs. direct Postgres read. If Postgres is faster, use it only for startup and NATS only for live updates.
+8. **DHCP HA across broadcast domains** – In a multi-site Kubernetes deployment, each node needs a DHCP server on its local broadcast domain. DaemonSet is the right primitive, but leader election must be per-node, not cluster-wide. Design the NATS KV lock key as `dhcp.leader.{node_name}`.
+9. **DHCPv6 prefix delegation (IA_PD)** – For ISP-style deployments where `dnsdave-dhcp` delegates IPv6 prefixes to customer routers. Scope for v0.5 or push to v1?
+10. **RFC 2136 TSIG auth** – DNS UPDATE packets can be authenticated with TSIG (HMAC-MD5 / HMAC-SHA256). Should this be required for RFC 2136 updates, or is IP-CIDR (`allow_update`) sufficient for v0.3?
+11. **mDNS unicast bridge** – Is the mDNS→unicast bridge in scope for v0.6, or only if there is user demand? Requires binding a multicast socket which may conflict with host mDNS daemons (avahi, mDNSResponder).
+12. **Secondary zone bootstrapping** – For `zone_type = secondary`, DNSDave must initiate an initial AXFR from the primary on zone creation. Which TCP connection pool handles this (reuse `dnsdave-dns` or a dedicated worker)?
+13. **Forward zone blocklisting** – Should forward zones optionally apply the local blocklist before forwarding (for filtering ads even on corporate DNS)? Or keep the bypass unconditional for simplicity?
+14. **DNSSEC validation and Pi-hole compatibility** – Pi-hole extensions and mobile apps send DNS queries directly; they don't set the DO bit. With strict DNSSEC validation enabled, should dnsdave-dns only validate its own upstream queries, or also re-validate queries that clients request validation for (CD bit)?
+15. **DNSSEC key rollover automation** – ZSK rollover requires coordinated publish→activate→retire phases over days. Should this be managed by a cron-style job within `dnsdave-api`, or a dedicated `dnsdave-keymgr` sidecar subscribed to NATS?
+16. **Trust anchor automatic updates** – The IANA root KSK rolls every ~5 years (next: ~2026). Should DNSDave fetch the current root trust anchor from IANA's XML feed automatically, or require manual operator action?
+17. **Local CA vs external CA for private deployments** – For home labs with no public NS delegation, the ACME DNS-01 flow requires a private ACME CA (Step CA, Vault PKI, etc.). Should DNSDave ship with an embedded minimal ACME CA, or document how to integrate with an external one? Shipping one adds significant scope but removes a dependency.
+18. **Certificate SAN coverage** – DoT/DoH clients validate the server certificate hostname. In multi-node deployments (multiple `dnsdave-dns` instances), each node needs a cert that covers its individual hostname AND the shared DNS service name. Should certs use a wildcard SAN, or per-node issuance?
+19. **ACME DNS-01 for split-horizon zones** – If the zone exists only locally (no public NS delegation), Let's Encrypt cannot validate DNS-01 challenges. Should DNSDave detect this case and warn the operator, or automatically fall back to self-signed?
+20. **`dnsdave-export` back-pressure** – If a backend (e.g., Logstash, remote Loki) is slow or down, NATS JetStream consumer ACK delay will build up. Should `dnsdave-export` use a bounded in-memory queue per backend with drop-oldest semantics, or block ACK and let JetStream naturally slow the consumer? The latter risks head-of-line blocking for other subjects on the same consumer.
+21. **Export schema versioning** – As new event types or fields are added, how should backward compatibility be maintained for external consumers that have dashboards or parser rules built against the schema? Versioned `event_schema_version` field in every envelope, with a compatibility matrix doc?
+22. **Syslog TLS (RELP/RFC 5425)** – For production deployments where syslog traffic must be encrypted (PCI-DSS, HIPAA). `dnsdave-export` should support TLS-wrapped TCP syslog (RFC 5425) and optionally RELP. Is this in scope for v0.5 or a follow-up?

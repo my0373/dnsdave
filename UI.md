@@ -1,4 +1,4 @@
-# DNSDave UI — Design Specification
+# DNSDave UI – Design Specification
 
 **Version:** 0.1.0-draft  
 **Date:** 2026-04-04  
@@ -16,7 +16,7 @@ DNSDave requires a management UI that can:
 - Provide a **real-time view** of DNS queries, DHCP lease events, and system health.
 - **Manage all configuration** objects (records, zones, blocklists, DHCP scopes, clients, certificates) with full CRUD.
 - Display **cluster-wide status** when multiple `dnsdave-dns` nodes are running.
-- Be **usable on any device** — from a wall-mounted monitoring display (1080p) to a phone in your pocket.
+- Be **usable on any device** – from a wall-mounted monitoring display (1080p) to a phone in your pocket.
 - Feel fast: **no full-page reloads**, optimistic UI updates, SSE-driven live data.
 
 ---
@@ -74,13 +74,13 @@ DNSDave uses a **slate-navy dark theme**. All colors are CSS custom properties, 
 --text-mono:     #cbd5e1;   /* DNS records, log rows */
 
 /* Semantic accents */
---dns:           #3b82f6;   /* blue-500  — DNS records, zones */
---allowed:       #10b981;   /* emerald-500 — pass / NOERROR */
---blocked:       #ef4444;   /* red-500   — NXDOMAIN from blocklist */
---cached:        #06b6d4;   /* cyan-500  — cache hit */
---local:         #8b5cf6;   /* violet-500 — local record / zone */
---dhcp:          #f59e0b;   /* amber-500 — DHCP events */
---forward:       #6366f1;   /* indigo-500 — forward zone */
+--dns:           #3b82f6;   /* blue-500  – DNS records, zones */
+--allowed:       #10b981;   /* emerald-500 – pass / NOERROR */
+--blocked:       #ef4444;   /* red-500   – NXDOMAIN from blocklist */
+--cached:        #06b6d4;   /* cyan-500  – cache hit */
+--local:         #8b5cf6;   /* violet-500 – local record / zone */
+--dhcp:          #f59e0b;   /* amber-500 – DHCP events */
+--forward:       #6366f1;   /* indigo-500 – forward zone */
 --warning:       #f59e0b;
 --danger:        #ef4444;
 --success:       #10b981;
@@ -253,12 +253,12 @@ Sections and items:
 
 Left to right:
 
-1. **Logo** — `dnsdave` wordmark + DNS icon; links to Dashboard
-2. **Global Search** (`Ctrl+K` — opens Command Palette) — placeholder "Search records, clients, domains…"
-3. **Node Picker** (visible in cluster mode) — dropdown listing all `dnsdave-dns` nodes with per-node QPS; "All nodes (aggregated)" is default
-4. **Theme toggle** — sun/moon icon; cycles `system → dark → light`
-5. **Notification bell** — count badge; opens notification drawer (last 50 system events)
-6. **User avatar / API key** — dropdown with "Copy API key", "Manage keys", "Sign out"
+1. **Logo** – `dnsdave` wordmark + DNS icon; links to Dashboard
+2. **Global Search** (`Ctrl+K` – opens Command Palette) – placeholder "Search records, clients, domains…"
+3. **Node Picker** (visible in cluster mode) – dropdown listing all `dnsdave-dns` nodes with per-node QPS; "All nodes (aggregated)" is default
+4. **Theme toggle** – sun/moon icon; cycles `system → dark → light`
+5. **Notification bell** – count badge; opens notification drawer (last 50 system events)
+6. **User avatar / API key** – dropdown with "Copy API key", "Manage keys", "Sign out"
 
 ### 5.4 Command Palette (`Ctrl+K`)
 
@@ -324,7 +324,7 @@ Keyboard navigation: `↑↓` to move, `Enter` to select, `Esc` to close.
 
 **Stat Cards:** Each card has: large number (countUp), label, sparkline (60-minute trend), delta vs previous period (▲/▼ with %).
 
-**Live Query Feed (mini):** 5-column abbreviated table — time (HH:mm:ss), client IP, domain (truncated to 40 chars), type, result badge. Clicking a row opens the full Query Log filtered to that client. "View all" link navigates to the Query Log page.
+**Live Query Feed (mini):** 5-column abbreviated table – time (HH:mm:ss), client IP, domain (truncated to 40 chars), type, result badge. Clicking a row opens the full Query Log filtered to that client. "View all" link navigates to the Query Log page.
 
 **Query Volume Chart:** Stacked area chart, 24 × 1-hour buckets. Stacks: Blocked (red), Cache hit (cyan), Local (violet), Upstream (green). Hover shows per-stack count + total.
 
@@ -362,7 +362,7 @@ Keyboard navigation: `↑↓` to move, `Enter` to select, `Esc` to close.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Full column set (configurable — drag to reorder, click eye to hide):**
+**Full column set (configurable – drag to reorder, click eye to hide):**
 
 | Column | Width | Notes |
 |--------|-------|-------|
@@ -374,8 +374,8 @@ Keyboard navigation: `↑↓` to move, `Enter` to select, `Esc` to close.
 | Result | 80px | Coloured badge: PASS / BLOCK / NXDOMAIN / SERVFAIL |
 | Source | 80px | local / cache / upstream / forward / blocklist |
 | Upstream | 140px | Which upstream responded (if applicable) |
-| Latency | 56px | ms; `—` for cached/local |
-| DNSSEC | 48px | AD / — / FAIL |
+| Latency | 56px | ms; `–` for cached/local |
+| DNSSEC | 48px | AD / – / FAIL |
 
 **Filter controls:**
 - **Domain search:** live regex filter (applied client-side to the in-memory buffer; server-side filter restarts the SSE subscription with `?q=` param)
@@ -450,7 +450,7 @@ Type-specific value helpers:
 
 **Purpose:** Manage authoritative zones, SOA records, transfer policy, and DNSSEC signing.
 
-**Layout:** Two-column — zone list on left (280px), zone detail on right.
+**Layout:** Two-column – zone list on left (280px), zone detail on right.
 
 ```
 ┌──────────────────┬────────────────────────────────────────────┐
@@ -471,7 +471,7 @@ Type-specific value helpers:
                    │  Status: Unsigned                            │
                    │                                             │
                    │ RECORDS          [+ Add] [View all →]       │
-                   │  6 records — A(3) AAAA(1) MX(1) TXT(1)     │
+                   │  6 records – A(3) AAAA(1) MX(1) TXT(1)     │
                    │                                             │
                    │ AXFR / IXFR LOG                             │
                    │  No transfers in last 24h                   │
@@ -513,7 +513,7 @@ DNSSEC         [Disable signing]
 │ ● Enabled        │ ● Enabled        │ ○ Disabled           │
 │ 163,428 domains  │ 1,012,874 domains│ 243,012 domains      │
 │ Synced 3h ago    │ Synced 3h ago    │ Never synced         │
-│ Next: 03:00      │ Next: 03:00      │ —                    │
+│ Next: 03:00      │ Next: 03:00      │ –                    │
 │ [Sync now] [Edit]│ [Sync now] [Edit]│ [Enable] [Edit]      │
 └──────────────────┴──────────────────┴──────────────────────┘
 ```
@@ -575,7 +575,7 @@ Detail drawer shows:
 ┌──────────────────────────────────────────────────────────┐
 │ DHCP Scopes    [+ Add Scope]                             │
 ├──────────────────────────────────────────────────────────┤
-│ LAN — 192.168.1.0/24                           ● Active  │
+│ LAN – 192.168.1.0/24                           ● Active  │
 │ Pool: 192.168.1.10 – 192.168.1.254             Router: 192.168.1.1 │
 │                                                           │
 │ ████████████████████████░░░░░░░░  67%  (168/250 leases)  │
@@ -583,7 +583,7 @@ Detail drawer shows:
 │                                                           │
 │  [View Leases]  [Manage Options]  [Reservations]  [Edit] │
 ├──────────────────────────────────────────────────────────┤
-│ IOT — 192.168.10.0/24                          ● Active  │
+│ IOT – 192.168.10.0/24                          ● Active  │
 │ ████████░░░░░░░░░░░░░░░░░░░░░░░░  24%  (60/250 leases)   │
 │  [View Leases]  [Manage Options]  [Reservations]  [Edit] │
 └──────────────────────────────────────────────────────────┘
@@ -1012,45 +1012,45 @@ Every UI page maps to specific API endpoints. This table is the source of truth 
 
 | Page / Component | Method | Endpoint | Notes |
 |-----------------|--------|----------|-------|
-| Dashboard — stat cards | GET | `/api/v1/stats/summary` | `?period=24h` |
-| Dashboard — query volume | GET | `/api/v1/stats/queries/timeseries` | `?bucket=1h&periods=24` |
-| Dashboard — top blocked | GET | `/api/v1/stats/domains/top` | `?filter=blocked&limit=10` |
-| Dashboard — top clients | GET | `/api/v1/stats/clients/top` | `?limit=10` |
-| Dashboard — live feed | SSE | `/api/v1/dns/queries/stream` | |
-| Dashboard — upstream health | GET | `/api/v1/dns/upstreams` | |
-| Dashboard — DHCP pool util | GET | `/api/v1/dhcp/scopes` | `?include=utilisation` |
-| Query Log — history | GET | `/api/v1/dns/queries` | Paginated; filterable |
-| Query Log — live | SSE | `/api/v1/dns/queries/stream` | `?q=&type=&result=&client=` |
-| DNS Records — list | GET | `/api/v1/dns/records` | `?zone=&type=&source=&q=` |
-| DNS Records — create | POST | `/api/v1/dns/records` | |
-| DNS Records — update | PUT | `/api/v1/dns/records/:id` | |
-| DNS Records — delete | DELETE | `/api/v1/dns/records/:id` | |
-| DNS Records — bulk | POST | `/api/v1/dns/records/bulk` | Import |
-| Zones — list | GET | `/api/v1/dns/zones` | |
-| Zones — create | POST | `/api/v1/dns/zones` | |
-| Zones — update | PUT | `/api/v1/dns/zones/:name` | |
-| Zones — delete | DELETE | `/api/v1/dns/zones/:name` | |
-| Zones — notify | POST | `/api/v1/dns/zones/:name/notify` | |
-| Zones — DS record | GET | `/api/v1/dns/dnssec/zones/:name/ds` | |
-| Blocklists — list | GET | `/api/v1/lists` | |
-| Blocklists — sync | POST | `/api/v1/lists/:id/sync` | |
+| Dashboard – stat cards | GET | `/api/v1/stats/summary` | `?period=24h` |
+| Dashboard – query volume | GET | `/api/v1/stats/queries/timeseries` | `?bucket=1h&periods=24` |
+| Dashboard – top blocked | GET | `/api/v1/stats/domains/top` | `?filter=blocked&limit=10` |
+| Dashboard – top clients | GET | `/api/v1/stats/clients/top` | `?limit=10` |
+| Dashboard – live feed | SSE | `/api/v1/dns/queries/stream` | |
+| Dashboard – upstream health | GET | `/api/v1/dns/upstreams` | |
+| Dashboard – DHCP pool util | GET | `/api/v1/dhcp/scopes` | `?include=utilisation` |
+| Query Log – history | GET | `/api/v1/dns/queries` | Paginated; filterable |
+| Query Log – live | SSE | `/api/v1/dns/queries/stream` | `?q=&type=&result=&client=` |
+| DNS Records – list | GET | `/api/v1/dns/records` | `?zone=&type=&source=&q=` |
+| DNS Records – create | POST | `/api/v1/dns/records` | |
+| DNS Records – update | PUT | `/api/v1/dns/records/:id` | |
+| DNS Records – delete | DELETE | `/api/v1/dns/records/:id` | |
+| DNS Records – bulk | POST | `/api/v1/dns/records/bulk` | Import |
+| Zones – list | GET | `/api/v1/dns/zones` | |
+| Zones – create | POST | `/api/v1/dns/zones` | |
+| Zones – update | PUT | `/api/v1/dns/zones/:name` | |
+| Zones – delete | DELETE | `/api/v1/dns/zones/:name` | |
+| Zones – notify | POST | `/api/v1/dns/zones/:name/notify` | |
+| Zones – DS record | GET | `/api/v1/dns/dnssec/zones/:name/ds` | |
+| Blocklists – list | GET | `/api/v1/lists` | |
+| Blocklists – sync | POST | `/api/v1/lists/:id/sync` | |
 | Allow/Block rules | GET/POST/DELETE | `/api/v1/lists/rules` | |
 | Forward Zones | GET/POST/PUT/DELETE | `/api/v1/dns/forwardzones` | |
 | DHCP Scopes | GET/POST/PUT/DELETE | `/api/v1/dhcp/scopes` | |
-| DHCP Leases — list | GET | `/api/v1/dhcp/leases` | |
-| DHCP Leases — live | SSE | `/api/v1/dhcp/leases/stream` | |
-| DHCP Leases — release | POST | `/api/v1/dhcp/leases/:id/release` | |
+| DHCP Leases – list | GET | `/api/v1/dhcp/leases` | |
+| DHCP Leases – live | SSE | `/api/v1/dhcp/leases/stream` | |
+| DHCP Leases – release | POST | `/api/v1/dhcp/leases/:id/release` | |
 | DHCP Options | GET/POST/PUT/DELETE | `/api/v1/dhcp/options` | |
 | DHCP Reservations | GET/POST/PUT/DELETE | `/api/v1/dhcp/reservations` | |
-| Clients — list | GET | `/api/v1/clients` | |
-| Clients — history | GET | `/api/v1/clients/:id/queries` | |
+| Clients – list | GET | `/api/v1/clients` | |
+| Clients – history | GET | `/api/v1/clients/:id/queries` | |
 | Groups | GET/POST/PUT/DELETE | `/api/v1/groups` | |
 | Analytics | GET | `/api/v1/stats/*` | Various |
-| Cluster — nodes | GET | `/api/v1/cluster/nodes` | |
-| Cluster — NATS | GET | `/api/v1/cluster/nats` | |
-| System events — live | SSE | `/api/v1/system/events/stream` | |
-| Certificates — list | GET | `/api/v1/dns/dnssec/keys` | |
-| Certificates — renew | POST | `/api/v1/tls/certificates/:id/renew` | |
+| Cluster – nodes | GET | `/api/v1/cluster/nodes` | |
+| Cluster – NATS | GET | `/api/v1/cluster/nats` | |
+| System events – live | SSE | `/api/v1/system/events/stream` | |
+| Certificates – list | GET | `/api/v1/dns/dnssec/keys` | |
+| Certificates – renew | POST | `/api/v1/tls/certificates/:id/renew` | |
 | DNSSEC keys | GET/POST/DELETE | `/api/v1/dns/dnssec/keys` | |
 | Settings | GET/PATCH | `/api/v1/settings` | |
 | API Keys | GET/POST/DELETE | `/api/v1/auth/keys` | |
@@ -1080,7 +1080,7 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 ```
 
 **API proxying:** The SvelteKit server proxies all `/api/*` and `/api/stream/*` calls to `dnsdave-api`. This means:
-- The browser never sees the raw API URL — useful for split networks.
+- The browser never sees the raw API URL – useful for split networks.
 - The API key is stored server-side in a session cookie; never exposed to JS.
 - SSE streams are tunnelled through the SvelteKit SSR server.
 
@@ -1102,7 +1102,7 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 
 ## 14. UI Milestones
 
-### UI-v0.1 — Core shell + Dashboard
+### UI-v0.1 – Core shell + Dashboard
 - [ ] SvelteKit project scaffold, Tailwind, shadcn-svelte
 - [ ] Application shell (sidebar, top bar, theme toggle)
 - [ ] Dashboard page (stat cards, query volume chart, live feed mini, upstream health)
@@ -1110,7 +1110,7 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 - [ ] `LiveStore` SSE connection manager with reconnect + pause
 - [ ] `StatusBadge`, `SparklineChart` components
 
-### UI-v0.2 — DNS management
+### UI-v0.2 – DNS management
 - [ ] Query Log page (full table, filters, detail drawer, export)
 - [ ] DNS Records page (table, inline edit, bulk ops, add/import form)
 - [ ] Zones page (zone list + detail, SOA editing, AXFR log)
@@ -1118,25 +1118,25 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 - [ ] `CommandPalette` (Ctrl+K) with DNS record search
 - [ ] Keyboard shortcuts: `G D`, `G Q`, `Space` pause
 
-### UI-v0.3 — Blocklist + Forward Zones
+### UI-v0.3 – Blocklist + Forward Zones
 - [ ] Blocklist page (card grid, sync progress, domain count sparkline)
 - [ ] Allow/Block rules table
 - [ ] Forward Zones page (table + test-query inline tool)
 - [ ] Notification drawer (system events SSE)
 
-### UI-v0.4 — DHCP
+### UI-v0.4 – DHCP
 - [ ] DHCP Scopes page (`PoolGauge` component)
 - [ ] DHCP Leases page (live table + event stream toggle)
 - [ ] Reservations, Options (hierarchy tree), Client Classes
 - [ ] `NodeCard` component (for scope cards)
 
-### UI-v0.5 — Analytics + Clients + Cluster
+### UI-v0.5 – Analytics + Clients + Cluster
 - [ ] Analytics page (all charts, period selector, export)
 - [ ] Clients page (per-client drill-down, group management)
 - [ ] Cluster page (node cards, NATS stream health, Postgres HA status)
 - [ ] System events SSE → notification drawer
 
-### UI-v0.6 — Security + Settings + Polish
+### UI-v0.6 – Security + Settings + Polish
 - [ ] Certificates page (TLS cert management, ACME renewal)
 - [ ] DNSSEC Keys page (key lifecycle, DS export)
 - [ ] Settings page (all tabs including Danger Zone)
@@ -1148,7 +1148,7 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 
 ---
 
-## Appendix A — Colour Accessibility Matrix
+## Appendix A – Colour Accessibility Matrix
 
 All foreground/background pairs used in the UI, verified at WCAG 2.1 AA:
 
@@ -1165,7 +1165,7 @@ All foreground/background pairs used in the UI, verified at WCAG 2.1 AA:
 
 ---
 
-## Appendix B — Page Load Targets
+## Appendix B – Page Load Targets
 
 | Page | Target (cold, SSR) | Target (hot, client nav) |
 |------|--------------------|--------------------------|

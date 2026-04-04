@@ -1,4 +1,4 @@
-# DNSDave — Test Specification
+# DNSDave – Test Specification
 
 **Version:** 0.1.0-draft  
 **Date:** 2026-04-04  
@@ -25,15 +25,15 @@ NNN       : zero-padded sequence within component+type
 
 | Type | Scope | External deps | Run on |
 |------|-------|--------------|--------|
-| **Unit** | Single function or module | None — all I/O mocked | `cargo test` |
+| **Unit** | Single function or module | None – all I/O mocked | `cargo test` |
 | **Integration** | One or more containers, full stack | Docker Compose test stack | CI, `make test-integration` |
 | **Load** | Full stack under sustained traffic | Docker Compose + traffic generator | Dedicated runner, `make test-load` |
 
 ---
 
-## 1. DNS — Unit Tests
+## 1. DNS – Unit Tests
 
-### DNS-U-001 · Wire format decode — valid query
+### DNS-U-001 · Wire format decode – valid query
 
 **Goal:** Parser correctly decodes a well-formed DNS query packet.
 
@@ -45,7 +45,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-002 · Wire format decode — truncated packet
+### DNS-U-002 · Wire format decode – truncated packet
 
 **Goal:** Parser returns an error, does not panic, on a truncated UDP payload.
 
@@ -57,7 +57,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-003 · Domain lowercasing — in-place lookup table
+### DNS-U-003 · Domain lowercasing – in-place lookup table
 
 **Goal:** Domain lowercasing uses the 256-byte lookup table and produces no heap allocation.
 
@@ -69,7 +69,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-004 · Rule engine — allowlist takes priority over blocklist
+### DNS-U-004 · Rule engine – allowlist takes priority over blocklist
 
 **Goal:** A domain present in both the allowlist and the blocklist resolves as allowed.
 
@@ -82,7 +82,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-005 · Rule engine — exact local record takes priority over wildcard
+### DNS-U-005 · Rule engine – exact local record takes priority over wildcard
 
 **Goal:** An exact record match beats a wildcard match for the same name.
 
@@ -95,7 +95,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-006 · Rule engine — priority chain exhausted → upstream
+### DNS-U-006 · Rule engine – priority chain exhausted → upstream
 
 **Goal:** A domain not in allowlist, local records, or blocklist is forwarded.
 
@@ -108,7 +108,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-007 · Wildcard trie — single-label match
+### DNS-U-007 · Wildcard trie – single-label match
 
 **Goal:** `*.k8s.home.arpa` matches `api.k8s.home.arpa` but not `nested.api.k8s.home.arpa`.
 
@@ -123,7 +123,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-008 · Wildcard trie — longest suffix wins
+### DNS-U-008 · Wildcard trie – longest suffix wins
 
 **Goal:** When two wildcards apply, the more specific one wins.
 
@@ -136,7 +136,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-009 · Wildcard trie — recursive flag enables multi-label match
+### DNS-U-009 · Wildcard trie – recursive flag enables multi-label match
 
 **Goal:** `recursive = true` on `*.home.arpa` matches `deep.nested.home.arpa`.
 
@@ -149,7 +149,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-010 · Bloom filter — known blocked domain returns positive
+### DNS-U-010 · Bloom filter – known blocked domain returns positive
 
 **Goal:** A domain inserted into the Bloom filter is detected on lookup.
 
@@ -162,7 +162,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-011 · Bloom filter — empirical false positive rate within spec
+### DNS-U-011 · Bloom filter – empirical false positive rate within spec
 
 **Goal:** FPR for 5M-domain filter is ≤0.001% against a disjoint probe set.
 
@@ -175,7 +175,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-012 · MPHF map — all inserted domains resolve
+### DNS-U-012 · MPHF map – all inserted domains resolve
 
 **Goal:** Every domain inserted into the MPHF blocklist map is found on lookup.
 
@@ -188,7 +188,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-013 · Answer cache — TTL-based expiry
+### DNS-U-013 · Answer cache – TTL-based expiry
 
 **Goal:** A cached entry is not returned after its TTL elapses.
 
@@ -203,7 +203,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-014 · Answer cache — negative cache (NXDOMAIN)
+### DNS-U-014 · Answer cache – negative cache (NXDOMAIN)
 
 **Goal:** An NXDOMAIN response is cached and served from cache on repeat queries.
 
@@ -216,7 +216,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-015 · ArcSwap — concurrent readers see new value after swap
+### DNS-U-015 · ArcSwap – concurrent readers see new value after swap
 
 **Goal:** After an ArcSwap, all readers load the new value; no reader ever gets a partially-updated state.
 
@@ -228,7 +228,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-U-016 · Buffer pool — no heap allocation on hot path
+### DNS-U-016 · Buffer pool – no heap allocation on hot path
 
 **Goal:** Processing a DNS query borrows from the pool and returns to it; heap allocator is not called.
 
@@ -241,9 +241,9 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 2. Blocklist — Unit Tests
+## 2. Blocklist – Unit Tests
 
-### BL-U-001 · Pi-hole hosts format — valid lines parsed
+### BL-U-001 · Pi-hole hosts format – valid lines parsed
 
 **Goal:** Parser extracts domain from `0.0.0.0 example.com` lines.
 
@@ -253,14 +253,14 @@ NNN       : zero-padded sequence within component+type
 | `127.0.0.1 tracking.io` | `tracking.io` |
 | `# comment line` | *(skipped)* |
 | *(blank line)* | *(skipped)* |
-| `0.0.0.0 localhost` | *(skipped — reserved)* |
-| `0.0.0.0 0.0.0.0` | *(skipped — invalid)* |
+| `0.0.0.0 localhost` | *(skipped – reserved)* |
+| `0.0.0.0 0.0.0.0` | *(skipped – invalid)* |
 
 **Pass:** Extracted domain set matches expected; no panic on any input line.
 
 ---
 
-### BL-U-002 · Domain-only format — valid and invalid lines
+### BL-U-002 · Domain-only format – valid and invalid lines
 
 | Input | Expected |
 |-------|----------|
@@ -274,7 +274,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BL-U-003 · Adblock Plus format — `||domain^` extraction
+### BL-U-003 · Adblock Plus format – `||domain^` extraction
 
 | Input | Expected |
 |-------|----------|
@@ -288,7 +288,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BL-U-004 · RPZ format — QNAME policy extraction
+### BL-U-004 · RPZ format – QNAME policy extraction
 
 | Input | Expected |
 |-------|----------|
@@ -301,7 +301,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BL-U-005 · Incremental diff — add and remove domains
+### BL-U-005 · Incremental diff – add and remove domains
 
 **Goal:** Diff between old and new domain sets produces correct add/remove batches.
 
@@ -329,7 +329,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BL-U-007 · MPHF construction — no false negatives, minimal false positives
+### BL-U-007 · MPHF construction – no false negatives, minimal false positives
 
 | Field | Value |
 |-------|-------|
@@ -339,7 +339,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BL-U-008 · Parser throughput — 1M domains in under 1 second
+### BL-U-008 · Parser throughput – 1M domains in under 1 second
 
 **Goal:** The streaming parser sustains >1M domains/second on a single core.
 
@@ -351,7 +351,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 3. DHCP — Unit Tests
+## 3. DHCP – Unit Tests
 
 ### DHCP-U-001 · DHCPv4 DISCOVER packet decode
 
@@ -377,7 +377,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-003 · Option encoding — option 121 (classless static routes)
+### DHCP-U-003 · Option encoding – option 121 (classless static routes)
 
 **Goal:** Multiple classless routes encoded correctly per RFC 3442.
 
@@ -389,7 +389,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-004 · Option hierarchy — reservation overrides scope
+### DHCP-U-004 · Option hierarchy – reservation overrides scope
 
 **Goal:** When the same option code exists at scope and reservation level, reservation value wins.
 
@@ -402,7 +402,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-005 · Option hierarchy — global fallback when scope not set
+### DHCP-U-005 · Option hierarchy – global fallback when scope not set
 
 **Goal:** A global option is used when neither scope nor reservation define it.
 
@@ -415,7 +415,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-006 · PXE architecture detection — option 93
+### DHCP-U-006 · PXE architecture detection – option 93
 
 | Option 93 value | Expected bootfile |
 |-----------------|------------------|
@@ -429,7 +429,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-007 · IP pool allocation — sequential assignment
+### DHCP-U-007 · IP pool allocation – sequential assignment
 
 **Goal:** Pool allocates IPs sequentially; no duplicate assignments.
 
@@ -442,7 +442,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-008 · IP pool allocation — exhaustion returns NAK
+### DHCP-U-008 · IP pool allocation – exhaustion returns NAK
 
 **Goal:** When pool is full, the 12th request receives a NAK.
 
@@ -455,7 +455,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-009 · IP pool — released IP returned to pool
+### DHCP-U-009 · IP pool – released IP returned to pool
 
 **Goal:** After a client releases a lease, its IP is available for reassignment.
 
@@ -469,7 +469,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-010 · Client class match — vendor-class-id prefix
+### DHCP-U-010 · Client class match – vendor-class-id prefix
 
 | Field | Value |
 |-------|-------|
@@ -504,7 +504,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-U-013 · DHCP relay — giaddr scope selection
+### DHCP-U-013 · DHCP relay – giaddr scope selection
 
 **Goal:** `giaddr` matching a scope's subnet selects that scope.
 
@@ -517,7 +517,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 4. Blocklist — Integration Tests
+## 4. Blocklist – Integration Tests
 
 ### BL-I-001 · StevenBlack unified list sync and blocking
 
@@ -545,7 +545,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BL-I-003 · Incremental sync — only delta applied
+### BL-I-003 · Incremental sync – only delta applied
 
 **Goal:** Adding 1,000 new domains to an existing list only blocks those new domains.
 
@@ -561,7 +561,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BL-I-004 · Blocklist hot-swap — zero dropped queries during rebuild
+### BL-I-004 · Blocklist hot-swap – zero dropped queries during rebuild
 
 **Goal:** DNS continues serving during a full blocklist rebuild; no queries dropped or error.
 
@@ -574,7 +574,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BL-I-005 · Per-group policy — group A blocked, group B allowed
+### BL-I-005 · Per-group policy – group A blocked, group B allowed
 
 **Goal:** The same domain is blocked for one client group and allowed for another.
 
@@ -604,7 +604,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 5. DNS — Integration Tests
+## 5. DNS – Integration Tests
 
 ### DNS-I-001 · End-to-end A record resolution
 
@@ -713,7 +713,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-I-010 · Split-horizon view — internal vs guest
+### DNS-I-010 · Split-horizon view – internal vs guest
 
 | Field | Value |
 |-------|-------|
@@ -726,7 +726,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-I-011 · Config change propagates — new record resolves within 5 seconds
+### DNS-I-011 · Config change propagates – new record resolves within 5 seconds
 
 | Field | Value |
 |-------|-------|
@@ -738,7 +738,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNS-I-012 · Record deletion propagates — record stops resolving within 5 seconds
+### DNS-I-012 · Record deletion propagates – record stops resolving within 5 seconds
 
 | Field | Value |
 |-------|-------|
@@ -750,9 +750,9 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 6. Local Zone Authority — Unit Tests
+## 6. Local Zone Authority – Unit Tests
 
-### ZONE-U-001 · Zone authority trie — exact zone match
+### ZONE-U-001 · Zone authority trie – exact zone match
 
 | Field | Value |
 |-------|-------|
@@ -762,7 +762,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### ZONE-U-002 · Zone authority trie — non-member query
+### ZONE-U-002 · Zone authority trie – non-member query
 
 | Field | Value |
 |-------|-------|
@@ -772,7 +772,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### ZONE-U-003 · Zone authority trie — subdomain of non-owned apex
+### ZONE-U-003 · Zone authority trie – subdomain of non-owned apex
 
 | Field | Value |
 |-------|-------|
@@ -792,7 +792,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### ZONE-U-005 · SOA serial auto-increment — format and wrap
+### ZONE-U-005 · SOA serial auto-increment – format and wrap
 
 | Field | Value |
 |-------|-------|
@@ -834,7 +834,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 7. Local Zone Authority — Integration Tests
+## 7. Local Zone Authority – Integration Tests
 
 ### ZONE-I-001 · Create zone and resolve authoritative NXDOMAIN
 
@@ -929,7 +929,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### ZONE-I-009 · RFC 2136 DNS UPDATE — add record
+### ZONE-I-009 · RFC 2136 DNS UPDATE – add record
 
 | Field | Value |
 |-------|-------|
@@ -940,7 +940,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### ZONE-I-010 · RFC 2136 DNS UPDATE — delete record
+### ZONE-I-010 · RFC 2136 DNS UPDATE – delete record
 
 | Field | Value |
 |-------|-------|
@@ -951,7 +951,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### ZONE-I-011 · RFC 2136 DNS UPDATE — rejected from unauthorised IP
+### ZONE-I-011 · RFC 2136 DNS UPDATE – rejected from unauthorised IP
 
 | Field | Value |
 |-------|-------|
@@ -974,7 +974,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### ZONE-I-013 · `home.arpa` reverse zone — PTR resolves from DHCP lease
+### ZONE-I-013 · `home.arpa` reverse zone – PTR resolves from DHCP lease
 
 | Field | Value |
 |-------|-------|
@@ -984,9 +984,9 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 8. Conditional Forwarding — Unit Tests
+## 8. Conditional Forwarding – Unit Tests
 
-### FWD-U-001 · Forward zone table — longest-suffix match
+### FWD-U-001 · Forward zone table – longest-suffix match
 
 | Field | Value |
 |-------|-------|
@@ -997,7 +997,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### FWD-U-002 · Forward zone table — catch-all (`.`)
+### FWD-U-002 · Forward zone table – catch-all (`.`)
 
 | Field | Value |
 |-------|-------|
@@ -1020,7 +1020,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 9. Conditional Forwarding — Integration Tests
+## 9. Conditional Forwarding – Integration Tests
 
 ### FWD-I-001 · Forward zone created and queries routed to correct upstream
 
@@ -1034,7 +1034,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### FWD-I-002 · Forward zone cache — second query does not hit upstream
+### FWD-I-002 · Forward zone cache – second query does not hit upstream
 
 | Field | Value |
 |-------|-------|
@@ -1070,7 +1070,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### FWD-I-005 · Consul forward zone — `.consul` routes to `127.0.0.1:8600`
+### FWD-I-005 · Consul forward zone – `.consul` routes to `127.0.0.1:8600`
 
 | Field | Value |
 |-------|-------|
@@ -1082,9 +1082,9 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 10. DNSSEC — Unit Tests
+## 10. DNSSEC – Unit Tests
 
-### DNSSEC-U-001 · RRSIG validation — valid signature accepted
+### DNSSEC-U-001 · RRSIG validation – valid signature accepted
 
 | Field | Value |
 |-------|-------|
@@ -1094,7 +1094,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNSSEC-U-002 · RRSIG validation — tampered record rejected (strict mode)
+### DNSSEC-U-002 · RRSIG validation – tampered record rejected (strict mode)
 
 | Field | Value |
 |-------|-------|
@@ -1105,7 +1105,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNSSEC-U-003 · RRSIG validation — failure logged but answered (opportunistic mode)
+### DNSSEC-U-003 · RRSIG validation – failure logged but answered (opportunistic mode)
 
 | Field | Value |
 |-------|-------|
@@ -1116,7 +1116,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNSSEC-U-004 · NSEC3 negative proof — NXDOMAIN validated
+### DNSSEC-U-004 · NSEC3 negative proof – NXDOMAIN validated
 
 | Field | Value |
 |-------|-------|
@@ -1131,7 +1131,7 @@ NNN       : zero-padded sequence within component+type
 | Field | Value |
 |-------|-------|
 | Input | Ed25519 keypair generated; DNSKEY RDATA serialised |
-| Expected | Deserialized DNSKEY matches original public key bytes; key tag computed deterministically |
+| Expected | Deserialised DNSKEY matches original public key bytes; key tag computed deterministically |
 | Pass | DNSKEY encode/decode is lossless |
 
 ---
@@ -1146,7 +1146,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNSSEC-U-007 · NSEC3 chain — no zone enumeration
+### DNSSEC-U-007 · NSEC3 chain – no zone enumeration
 
 | Field | Value |
 |-------|-------|
@@ -1156,7 +1156,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 11. DNSSEC — Integration Tests
+## 11. DNSSEC – Integration Tests
 
 ### DNSSEC-I-001 · DO bit set on upstream queries when validation enabled
 
@@ -1194,7 +1194,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNSSEC-I-004 · Zone signing — DNSKEY served for signed zone
+### DNSSEC-I-004 · Zone signing – DNSKEY served for signed zone
 
 | Field | Value |
 |-------|-------|
@@ -1205,7 +1205,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNSSEC-I-005 · Zone signing — RRSIG returned for A record
+### DNSSEC-I-005 · Zone signing – RRSIG returned for A record
 
 | Field | Value |
 |-------|-------|
@@ -1216,7 +1216,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNSSEC-I-006 · Zone signing — NSEC3 returned for NXDOMAIN
+### DNSSEC-I-006 · Zone signing – NSEC3 returned for NXDOMAIN
 
 | Field | Value |
 |-------|-------|
@@ -1238,7 +1238,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DNSSEC-I-008 · New record in signed zone — RRSIG auto-regenerated
+### DNSSEC-I-008 · New record in signed zone – RRSIG auto-regenerated
 
 | Field | Value |
 |-------|-------|
@@ -1250,9 +1250,9 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 12. DHCP — Integration Tests
+## 12. DHCP – Integration Tests
 
-### DHCP-I-001 · DORA — client receives IP from pool
+### DHCP-I-001 · DORA – client receives IP from pool
 
 **Goal:** A full DISCOVER → OFFER → REQUEST → ACK sequence assigns an IP from the configured pool.
 
@@ -1265,7 +1265,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-002 · Static reservation — client always gets reserved IP
+### DHCP-I-002 · Static reservation – client always gets reserved IP
 
 | Field | Value |
 |-------|-------|
@@ -1276,7 +1276,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-003 · Lease renewal — T1 elapsed, client renews
+### DHCP-I-003 · Lease renewal – T1 elapsed, client renews
 
 | Field | Value |
 |-------|-------|
@@ -1287,7 +1287,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-004 · Lease release — IP returned to pool
+### DHCP-I-004 · Lease release – IP returned to pool
 
 | Field | Value |
 |-------|-------|
@@ -1299,7 +1299,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-005 · Pool exhaustion — NAK on full pool
+### DHCP-I-005 · Pool exhaustion – NAK on full pool
 
 | Field | Value |
 |-------|-------|
@@ -1310,7 +1310,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-006 · Option delivery — DNS server set to dnsdave-dns IP
+### DHCP-I-006 · Option delivery – DNS server set to dnsdave-dns IP
 
 | Field | Value |
 |-------|-------|
@@ -1321,7 +1321,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-007 · Option hierarchy — reservation overrides scope
+### DHCP-I-007 · Option hierarchy – reservation overrides scope
 
 | Field | Value |
 |-------|-------|
@@ -1332,7 +1332,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-008 · PXE — BIOS client receives pxelinux.0
+### DHCP-I-008 · PXE – BIOS client receives pxelinux.0
 
 | Field | Value |
 |-------|-------|
@@ -1343,7 +1343,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-009 · PXE — UEFI client receives bootx64.efi
+### DHCP-I-009 · PXE – UEFI client receives bootx64.efi
 
 | Field | Value |
 |-------|-------|
@@ -1354,7 +1354,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-010 · DHCP relay — client behind relay assigned IP from correct scope
+### DHCP-I-010 · DHCP relay – client behind relay assigned IP from correct scope
 
 | Field | Value |
 |-------|-------|
@@ -1376,7 +1376,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-012 · DHCPv6 SARR — client receives IA_NA address
+### DHCP-I-012 · DHCPv6 SARR – client receives IA_NA address
 
 | Field | Value |
 |-------|-------|
@@ -1387,7 +1387,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DHCP-I-013 · Client class — vendor class match delivers class options
+### DHCP-I-013 · Client class – vendor class match delivers class options
 
 | Field | Value |
 |-------|-------|
@@ -1398,7 +1398,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 13. Dynamic DNS (DHCP→DNS) — Integration Tests
+## 13. Dynamic DNS (DHCP→DNS) – Integration Tests
 
 ### DDNS-I-001 · Lease assigned → A record created automatically
 
@@ -1452,7 +1452,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DDNS-I-006 · Hostname collision — new IP updates existing record
+### DDNS-I-006 · Hostname collision – new IP updates existing record
 
 | Field | Value |
 |-------|-------|
@@ -1473,7 +1473,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DDNS-I-008 · Dual-stack — A and AAAA for same hostname
+### DDNS-I-008 · Dual-stack – A and AAAA for same hostname
 
 | Field | Value |
 |-------|-------|
@@ -1483,7 +1483,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### DDNS-I-009 · DNS node restart — lease records restored from JetStream replay
+### DDNS-I-009 · DNS node restart – lease records restored from JetStream replay
 
 | Field | Value |
 |-------|-------|
@@ -1494,9 +1494,9 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 14. API — Integration Tests
+## 14. API – Integration Tests
 
-### API-I-001 · Authentication — missing API key returns 401
+### API-I-001 · Authentication – missing API key returns 401
 
 | Field | Value |
 |-------|-------|
@@ -1506,7 +1506,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### API-I-002 · Authentication — invalid API key returns 401
+### API-I-002 · Authentication – invalid API key returns 401
 
 | Field | Value |
 |-------|-------|
@@ -1516,7 +1516,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### API-I-003 · Authentication — valid API key returns 200
+### API-I-003 · Authentication – valid API key returns 200
 
 | Field | Value |
 |-------|-------|
@@ -1526,7 +1526,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### API-I-004 · Scoped key — read-only key rejected for write operations
+### API-I-004 · Scoped key – read-only key rejected for write operations
 
 | Field | Value |
 |-------|-------|
@@ -1607,7 +1607,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### API-I-011 · SSE query log stream — event appears within 500ms
+### API-I-011 · SSE query log stream – event appears within 500ms
 
 | Field | Value |
 |-------|-------|
@@ -1618,7 +1618,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### API-I-012 · SSE lease stream — event appears within 500ms
+### API-I-012 · SSE lease stream – event appears within 500ms
 
 | Field | Value |
 |-------|-------|
@@ -1639,7 +1639,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### API-I-014 · Pagination — correct pages returned
+### API-I-014 · Pagination – correct pages returned
 
 | Field | Value |
 |-------|-------|
@@ -1660,7 +1660,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 15. Event Bus — Integration Tests
+## 15. Event Bus – Integration Tests
 
 ### BUS-I-001 · API write publishes NATS config event
 
@@ -1695,7 +1695,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BUS-I-004 · NATS unavailable — DNS continues serving from in-memory state
+### BUS-I-004 · NATS unavailable – DNS continues serving from in-memory state
 
 | Field | Value |
 |-------|-------|
@@ -1706,7 +1706,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BUS-I-005 · NATS unavailable — query events buffered in ring buffer
+### BUS-I-005 · NATS unavailable – query events buffered in ring buffer
 
 | Field | Value |
 |-------|-------|
@@ -1717,7 +1717,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-### BUS-I-006 · DNS node restart — full state restored from JetStream replay
+### BUS-I-006 · DNS node restart – full state restored from JetStream replay
 
 | Field | Value |
 |-------|-------|
@@ -1758,7 +1758,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-001 · DNS throughput — blocked/cached queries >800K QPS
+### PERF-L-001 · DNS throughput – blocked/cached queries >800K QPS
 
 | Field | Value |
 |-------|-------|
@@ -1771,7 +1771,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-002 · DNS latency — p50/p99/p999 for blocked queries
+### PERF-L-002 · DNS latency – p50/p99/p999 for blocked queries
 
 | Field | Value |
 |-------|-------|
@@ -1782,7 +1782,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-003 · DNS latency — p99 stable over 10 minutes (no GC spikes)
+### PERF-L-003 · DNS latency – p99 stable over 10 minutes (no GC spikes)
 
 **Goal:** p99 does not degrade over time due to GC or memory pressure.
 
@@ -1794,7 +1794,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-004 · Blocklist parse throughput — 1M domains <1 second
+### PERF-L-004 · Blocklist parse throughput – 1M domains <1 second
 
 | Field | Value |
 |-------|-------|
@@ -1804,7 +1804,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-005 · Bloom filter hot-swap — zero errors during rebuild
+### PERF-L-005 · Bloom filter hot-swap – zero errors during rebuild
 
 | Field | Value |
 |-------|-------|
@@ -1815,7 +1815,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-006 · Memory — RSS under 300MB at 5M-domain blocklist
+### PERF-L-006 · Memory – RSS under 300MB at 5M-domain blocklist
 
 | Field | Value |
 |-------|-------|
@@ -1825,7 +1825,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-007 · Memory — no growth over 1 hour of sustained load
+### PERF-L-007 · Memory – no growth over 1 hour of sustained load
 
 **Goal:** RSS does not grow unboundedly (no memory leaks).
 
@@ -1837,7 +1837,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-008 · DNS cold start — serving within 10 seconds
+### PERF-L-008 · DNS cold start – serving within 10 seconds
 
 | Field | Value |
 |-------|-------|
@@ -1848,7 +1848,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-009 · DHCP throughput — 1000 DISCOVER/s without loss
+### PERF-L-009 · DHCP throughput – 1000 DISCOVER/s without loss
 
 | Field | Value |
 |-------|-------|
@@ -1859,7 +1859,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### PERF-L-010 · Blocklist parser — 5M domains in under 5 seconds
+### PERF-L-010 · Blocklist parser – 5M domains in under 5 seconds
 
 | Field | Value |
 |-------|-------|
@@ -1882,7 +1882,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ## 17. Security Tests
 
-### SEC-001 · Unauthenticated API request — 401 on every endpoint
+### SEC-001 · Unauthenticated API request – 401 on every endpoint
 
 | Field | Value |
 |-------|-------|
@@ -1902,7 +1902,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### SEC-003 · NATS ACL — DNS container cannot publish config events
+### SEC-003 · NATS ACL – DNS container cannot publish config events
 
 | Field | Value |
 |-------|-------|
@@ -1913,7 +1913,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### SEC-004 · NATS ACL — DHCP container cannot publish query events
+### SEC-004 · NATS ACL – DHCP container cannot publish query events
 
 | Field | Value |
 |-------|-------|
@@ -1924,7 +1924,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### SEC-005 · DHCP option injection — undeclared raw custom code rejected
+### SEC-005 · DHCP option injection – undeclared raw custom code rejected
 
 | Field | Value |
 |-------|-------|
@@ -1934,7 +1934,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### SEC-006 · DHCP rate limiting — excessive DISCOVERs from one MAC throttled
+### SEC-006 · DHCP rate limiting – excessive DISCOVERs from one MAC throttled
 
 | Field | Value |
 |-------|-------|
@@ -1945,7 +1945,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### SEC-007 · API key stored hashed — plaintext not recoverable from DB
+### SEC-007 · API key stored hashed – plaintext not recoverable from DB
 
 | Field | Value |
 |-------|-------|
@@ -1978,7 +1978,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### SEC-010 · TLS cert hot-reload — no restart required
+### SEC-010 · TLS cert hot-reload – no restart required
 
 | Field | Value |
 |-------|-------|
@@ -1990,7 +1990,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### SEC-011 · NATS connection requires TLS — plaintext rejected
+### SEC-011 · NATS connection requires TLS – plaintext rejected
 
 | Field | Value |
 |-------|-------|
@@ -2001,7 +2001,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-### SEC-012 · ACME DNS-01 helper — certbot RFC 2136 places TXT record
+### SEC-012 · ACME DNS-01 helper – certbot RFC 2136 places TXT record
 
 | Field | Value |
 |-------|-------|
@@ -2079,7 +2079,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-## Appendix A — Test Environment Requirements
+## Appendix A – Test Environment Requirements
 
 | Component | Minimum spec |
 |-----------|-------------|
@@ -2096,7 +2096,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-## Appendix B — Milestone Test Gates
+## Appendix B – Milestone Test Gates
 
 | Milestone | Must pass before merge |
 |-----------|----------------------|
@@ -2110,7 +2110,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-## Appendix C — Regression Policy
+## Appendix C – Regression Policy
 
 - Any test that was previously passing and now fails blocks the PR.
 - Load test regressions of >5% on any metric block the PR.

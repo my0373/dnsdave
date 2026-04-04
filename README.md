@@ -1,6 +1,6 @@
 # dnsdave
 
-> **Status: Design complete — implementation in progress.**  
+> **Status: Design complete – implementation in progress.**  
 > All architecture, APIs, and tests are fully specified. Code is not yet written.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@
 [![Language: Rust](https://img.shields.io/badge/language-Rust-orange)](https://www.rust-lang.org)
 [![UI: SvelteKit](https://img.shields.io/badge/UI-SvelteKit-red)](UI.md)
 
-**DNSDave** is an API-first, event-driven DNS + DHCP server designed for private networks — from a Raspberry Pi on your desk to a multi-node Kubernetes cluster. It blocks ads and telemetry at the DNS layer, manages DHCP leases with full RFC option support, acts as the authoritative DNS server for your local zones, and exposes every function through a stable REST API and a real-time web UI.
+**DNSDave** is an API-first, event-driven DNS + DHCP server designed for private networks – from a Raspberry Pi on your desk to a multi-node Kubernetes cluster. It blocks ads and telemetry at the DNS layer, manages DHCP leases with full RFC option support, acts as the authoritative DNS server for your local zones, and exposes every function through a stable REST API and a real-time web UI.
 
 It was built to fill the gap between **Pi-hole** (excellent filtering, limited management) and **Infoblox** (complete DDI, enterprise price tag): production-grade DNS infrastructure that a developer or small ops team can operate without becoming DNS experts.
 
@@ -40,15 +40,15 @@ See [`COMPARISON.md`](COMPARISON.md) for a full comparison against Pi-hole, AdGu
 
 ### DNS
 - **Forwarding resolver** with DoH and DoT upstreams, HTTP/2 connection pooling, and upstream health checks
-- **Authoritative zones** — SOA, NS, AXFR, IXFR, RFC 1996 NOTIFY, RFC 2136 DNS UPDATE; `home.arpa` template built-in
+- **Authoritative zones** – SOA, NS, AXFR, IXFR, RFC 1996 NOTIFY, RFC 2136 DNS UPDATE; `home.arpa` template built-in
 - **Wildcard DNS** (`*.apps.home.arpa`) with longest-suffix-wins label trie
-- **Conditional forwarding** — route specific domains to specific resolvers (VPN, Consul, corporate DNS), bypassing the blocklist
-- **Split-horizon views** — different answers for different client groups
+- **Conditional forwarding** – route specific domains to specific resolvers (VPN, Consul, corporate DNS), bypassing the blocklist
+- **Split-horizon views** – different answers for different client groups
 - **DNSSEC validation** (strict / opportunistic / off) with AD bit; **DNSSEC zone signing** with Ed25519 / ECDSA keys, NSEC3, automated ZSK rollover
 
 ### Blocklist & Filtering
 - Ingests **Pi-hole gravity**, domain-only, AdBlock Plus, and RPZ formats
-- **Bloom filter + Minimal Perfect Hash Function** two-stage lookup — sub-microsecond blocked-domain response, ~130 MB for 5M domains
+- **Bloom filter + Minimal Perfect Hash Function** two-stage lookup – sub-microsecond blocked-domain response, ~130 MB for 5M domains
 - **Incremental sync** with hot-swap: new blocklist goes live in seconds with zero query downtime
 - Per-client / per-group policies; allowlist always wins
 
@@ -58,21 +58,21 @@ See [`COMPARISON.md`](COMPARISON.md) for a full comparison against Pi-hole, AdGu
 - **PXE boot** with automatic BIOS/UEFI architecture detection (option 93)
 - **DHCP relay** (RFC 3046, giaddr + option 82)
 - **Vendor / client class** matching
-- **Automatic dynamic DNS** registration (A + AAAA + PTR) on every lease assignment via NATS — no polling
+- **Automatic dynamic DNS** registration (A + AAAA + PTR) on every lease assignment via NATS – no polling
 
 ### Certificates
-- **Self-signed bootstrap** via `rcgen` on first start — HTTPS works with zero configuration
-- **ACME (Let's Encrypt)** auto-provisioning using DNS-01 over its own RFC 2136 interface — no port 80 required
+- **Self-signed bootstrap** via `rcgen` on first start – HTTPS works with zero configuration
+- **ACME (Let's Encrypt)** auto-provisioning using DNS-01 over its own RFC 2136 interface – no port 80 required
 - **ACME DNS-01 helper** for any other service in your network (`certbot --dns-rfc2136` against DNSDave's zone)
-- **TLS hot-reload** across all containers on cert renewal — no restarts
+- **TLS hot-reload** across all containers on cert renewal – no restarts
 
 ### Architecture
-- **Event-driven via NATS JetStream** — the DNS hot path fires non-blocking NATS publishes; logging, stats, and DHCP DDNS are downstream consumers
-- **Stateless DNS data plane** — each `dnsdave-dns` node derives its full runtime state from NATS on startup; scale horizontally by adding nodes
-- **`SO_REUSEPORT` + `recvmmsg`/`sendmmsg`** — one Tokio task per CPU core, batch UDP I/O
-- **Lock-free ArcSwap structures** — blocklist, zone trie, forward zone table, and allowlist all hot-swap via atomic pointer swap with no query-path locking
-- **GC-free** — written in Rust; no garbage collector pauses on the hot path
-- **Pluggable observability export** — `dnsdave-export` subscribes to NATS and pushes events to any external system: syslog (rsyslog), Grafana Loki, ELK / Logstash, Splunk, InfluxDB, StatsD, Datadog, or generic HTTP webhook — zero changes to existing containers required
+- **Event-driven via NATS JetStream** – the DNS hot path fires non-blocking NATS publishes; logging, stats, and DHCP DDNS are downstream consumers
+- **Stateless DNS data plane** – each `dnsdave-dns` node derives its full runtime state from NATS on startup; scale horizontally by adding nodes
+- **`SO_REUSEPORT` + `recvmmsg`/`sendmmsg`** – one Tokio task per CPU core, batch UDP I/O
+- **Lock-free ArcSwap structures** – blocklist, zone trie, forward zone table, and allowlist all hot-swap via atomic pointer swap with no query-path locking
+- **GC-free** – written in Rust; no garbage collector pauses on the hot path
+- **Pluggable observability export** – `dnsdave-export` subscribes to NATS and pushes events to any external system: syslog (rsyslog), Grafana Loki, ELK / Logstash, Splunk, InfluxDB, StatsD, Datadog, or generic HTTP webhook – zero changes to existing containers required
 
 ---
 
@@ -80,7 +80,7 @@ See [`COMPARISON.md`](COMPARISON.md) for a full comparison against Pi-hole, AdGu
 
 ```mermaid
 graph TD
-    Clients["Client Network — Browsers · IoT · Mobile · resolv.conf · Pi-hole apps"]
+    Clients["Client Network – Browsers · IoT · Mobile · resolv.conf · Pi-hole apps"]
 
     subgraph DP["Data Plane"]
         DNS["dnsdave-dns  :53/:853\nRust · SO_REUSEPORT · zero-alloc\nBloom+MPHF · ArcSwap · moka cache"]
@@ -133,17 +133,17 @@ cp .env.example .env          # set POSTGRES_PASSWORD, DNSDAVE_API_KEY
 docker compose up -d
 
 # UI is available at http://<host>:3000
-# DNS is on port 53 — point your router's DNS to this host
-# DHCP is on port 67 — configure in the UI
+# DNS is on port 53 – point your router's DNS to this host
+# DHCP is on port 67 – configure in the UI
 ```
 
 **Point your devices at DNSDave:** set your router's DHCP option 6 (DNS server) to the IP of your DNSDave host, or configure DNSDave's own DHCP server to hand out its address.
 
-### Raspberry Pi 3 (1 GB RAM) — Minimal Profile
+### Raspberry Pi 3 (1 GB RAM) – Minimal Profile
 
 ```bash
 docker compose -f docker-compose.minimal.yml up -d
-# Uses SQLite, no dnsdave-log/stats, reduced cache — ~300 MB RSS
+# Uses SQLite, no dnsdave-log/stats, reduced cache – ~300 MB RSS
 ```
 
 ### Kubernetes
@@ -158,7 +158,7 @@ helm install dnsdave dnsdave/dnsdave \
 ### macOS Development
 
 ```bash
-# No Docker needed — runs natively (recv_from/send_to fallback for :53)
+# No Docker needed – runs natively (recv_from/send_to fallback for :53)
 cargo run --bin dnsdave-dns -- --config config/dev.toml
 cargo run --bin dnsdave-api -- --config config/dev.toml
 ```
@@ -172,10 +172,10 @@ cargo run --bin dnsdave-api -- --config config/dev.toml
 | `linux/amd64` | `x86_64-unknown-linux-gnu` | Servers, VMs, x86 desktops |
 | `linux/arm64` | `aarch64-unknown-linux-gnu` | **Raspberry Pi 3/4/5** (64-bit OS), Apple Silicon, AWS Graviton |
 | `linux/arm/v7` | `armv7-unknown-linux-gnueabihf` | **Raspberry Pi 3+** (32-bit OS) |
-| `macOS/arm64` | `aarch64-apple-darwin` | Apple Silicon (M1/M2/M3/M4) — dev only |
-| `macOS/x86_64` | `x86_64-apple-darwin` | Intel Mac — dev only |
+| `macOS/arm64` | `aarch64-apple-darwin` | Apple Silicon (M1/M2/M3/M4) – dev only |
+| `macOS/x86_64` | `x86_64-apple-darwin` | Intel Mac – dev only |
 
-All container images are published as **multi-arch manifests** — `docker pull` resolves the correct variant automatically. No build flags needed.
+All container images are published as **multi-arch manifests** – `docker pull` resolves the correct variant automatically. No build flags needed.
 
 ---
 
@@ -183,9 +183,9 @@ All container images are published as **multi-arch manifests** — `docker pull`
 
 | Document | Description |
 |----------|-------------|
-| [`DESIGN.md`](DESIGN.md) | Full architecture and product design — goals, event bus, performance architecture, DNS features, DHCP, DNSSEC, certificates, API design, data model, deployment, observability, security, milestones, technology choices |
-| [`UI.md`](UI.md) | Web UI design specification — design system, all 12 pages, component catalogue, SSE data layer, responsive design, accessibility, keyboard shortcuts, API integration map |
-| [`TESTS.md`](TESTS.md) | Test specification — 150+ named unit, integration, and load tests across all components; milestone test gates; regression policy |
+| [`DESIGN.md`](DESIGN.md) | Full architecture and product design – goals, event bus, performance architecture, DNS features, DHCP, DNSSEC, certificates, API design, data model, deployment, observability, security, milestones, technology choices |
+| [`UI.md`](UI.md) | Web UI design specification – design system, all 12 pages, component catalogue, SSE data layer, responsive design, accessibility, keyboard shortcuts, API integration map |
+| [`TESTS.md`](TESTS.md) | Test specification – 150+ named unit, integration, and load tests across all components; milestone test gates; regression policy |
 | [`COMPARISON.md`](COMPARISON.md) | Competitive comparison against Pi-hole, AdGuard Home, Technitium, dnsmasq, CoreDNS, BIND9, PowerDNS, and Infoblox across 13 feature categories |
 
 ---
@@ -224,10 +224,10 @@ All container images are published as **multi-arch manifests** — `docker pull`
 
 DNSDave is scoped deliberately. It does not:
 
-- **Act as a public internet DNS server** — it is designed for private networks. Use PowerDNS or Cloudflare for public authoritative hosting.
-- **Include IPAM** — IP address management (subnet tracking, network discovery) is out of scope. Pair DNSDave with [NetBox](https://netbox.dev) for a full DDI stack.
-- **Perform full recursive resolution** — it always forwards to a configured upstream. For full recursion use [Unbound](https://nlnetlabs.nl/projects/unbound/).
-- **Replace CoreDNS for Kubernetes service discovery** — DNSDave coexists with CoreDNS; CoreDNS handles `cluster.local`, DNSDave handles the network perimeter.
+- **Act as a public internet DNS server** – it is designed for private networks. Use PowerDNS or Cloudflare for public authoritative hosting.
+- **Include IPAM** – IP address management (subnet tracking, network discovery) is out of scope. Pair DNSDave with [NetBox](https://netbox.dev) for a full DDI stack.
+- **Perform full recursive resolution** – it always forwards to a configured upstream. For full recursion use [Unbound](https://nlnetlabs.nl/projects/unbound/).
+- **Replace CoreDNS for Kubernetes service discovery** – DNSDave coexists with CoreDNS; CoreDNS handles `cluster.local`, DNSDave handles the network perimeter.
 
 ---
 
@@ -253,8 +253,8 @@ To discuss the design, open an [issue](https://github.com/my0373/dnsdave/issues)
 
 ---
 
-## License
+## Licence
 
 DNSDave is released under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
 
-Because DNSDave is a network service, AGPL-3.0 ensures that anyone running a modified version as a service must make their source changes available — closing the "SaaS loophole" that standard GPL-3.0 leaves open. All dependencies are MIT or Apache 2.0 licensed and are fully compatible with AGPL-3.0.
+Because DNSDave is a network service, AGPL-3.0 ensures that anyone running a modified version as a service must make their source changes available – closing the "SaaS loophole" that standard GPL-3.0 leaves open. All dependencies are MIT or Apache 2.0 licensed and are fully compatible with AGPL-3.0.

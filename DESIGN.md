@@ -1,6 +1,6 @@
 # DNSDave — Product Design Document
 
-**Version:** 0.3.0-draft  
+**Version:** 0.4.0-draft  
 **Date:** 2026-04-04  
 **Status:** Draft
 
@@ -15,9 +15,10 @@ Pi-hole is the de facto home DNS sinkhole, but it carries a decade of design con
 - Wildcard DNS records are not natively supported.
 - It is tightly coupled to a single-host systemd + dnsmasq stack, making HA or containerised deployments painful.
 - Blocklist management is monolithic; adding or removing lists requires a full gravity rebuild.
-- A monolithic architecture makes adding new functionality (alerting, analytics, integrations) require touching the core process.
+- DHCP and DNS are managed separately with no automatic integration between them.
+- A monolithic architecture makes adding new functionality require touching the core process.
 
-DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **event-driven**, **container-native**, with first-class blocklist support fully compatible with the existing Pi-hole / Steven Black / OISD ecosystem.
+DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **event-driven**, **container-native**, with first-class blocklist support, a fully integrated DHCPv4/DHCPv6 server, and compatibility with the existing Pi-hole ecosystem.
 
 ---
 
@@ -34,13 +35,13 @@ DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **even
 | G6 | Provide rich per-client, per-domain query logs with live streaming. |
 | G7 | Allow grouping of clients and applying different blocklist/allowlist policies per group. |
 | G8 | Be drop-in compatible with existing Pi-hole browser extensions and mobile apps that use the Pi-hole API. |
-| G9 | **Loose coupling via an event bus.** The DNS hot path offloads all side-effects (logging, stats, notifications) asynchronously. New functionality is added by subscribing to the bus — zero changes to the DNS container. |
+| G9 | **Loose coupling via an event bus.** The DNS hot path offloads all side-effects asynchronously. New functionality is added by subscribing to the bus — zero changes to the DNS container. |
+| G10 | **First-class DHCPv4 and DHCPv6 server** with full RFC option support, static reservations, PXE boot, DHCP relay, and automatic DNS record registration on lease assignment. |
 
 ### Non-Goals (v1)
 
 - Building a full recursive resolver (we forward upstream).
 - DNSSEC signing of local zones.
-- A built-in DHCP server (can integrate with existing DHCP via API hooks).
 - A bundled web UI (the API is the product; a reference SPA can come later).
 
 ---
@@ -68,20 +69,25 @@ graph TD
         SYNC["dnsdave-sync\nBlocklist downloader + parser"]
         LOG["dnsdave-log\nQuery log bulk writer"]
         STATS["dnsdave-stats\nIn-memory stats aggregator"]
+        DHCP["dnsdave-dhcp  (Rust)\n:67 UDP DHCPv4  ·  :547 UDP DHCPv6\nDORA + SARR state machines\nPXE · relay · vendor classes"]
     end
 
-    PG[("PostgreSQL\nconfig · lists · logs")]
+    PG[("PostgreSQL\nconfig · lists · logs · leases")]
 
     Clients -->|"DNS UDP/TCP :53  ·  DoT :853"| DNS
+    Clients -->|"DHCP :67  ·  DHCPv6 :547"| DHCP
     DNS -->|"query events\nfire & forget · MessagePack"| NATS
-    NATS -->|"config hot-swap · blocklist diffs\nbloom filters · runtime KV"| DNS
+    NATS -->|"config hot-swap · blocklist diffs\nbloom filters · runtime KV\nlease events → dynamic DNS"| DNS
     API -->|"config change events"| NATS
     NATS -->|"query events"| LOG
     NATS -->|"query events"| STATS
     SYNC -->|"blocklist diffs · bloom filter\nready signals"| NATS
+    DHCP -->|"lease events"| NATS
+    NATS -->|"scope config · reservations"| DHCP
     API <-->|"reads / writes"| PG
     SYNC -->|"list entries delta"| PG
     LOG -->|"bulk inserts"| PG
+    DHCP <-->|"leases · reservations"| PG
 ```
 
 ### 3.2 Container Responsibilities
@@ -89,20 +95,21 @@ graph TD
 | Container | Language | Role | Talks to |
 |-----------|----------|------|----------|
 | `dnsdave-dns` | **Rust** | DNS data plane. Serves queries. Zero DB access. | NATS only |
-| `dnsdave-api` | Rust or Go | REST API + Pi-hole shim. Owns all config writes. | Postgres + NATS |
-| `dnsdave-sync` | Rust or Go | Blocklist downloader + parser. | Postgres + NATS + HTTP (lists) |
-| `dnsdave-log` | Go or Rust | Query log consumer. Bulk-writes to Postgres. | NATS + Postgres |
-| `dnsdave-stats` | Go or Rust | Stats aggregator. Maintains in-memory counters. | NATS |
-| `nats` | — | Event bus. Core pub/sub + JetStream + Object Store. | — |
+| `dnsdave-api` | Rust | REST API + Pi-hole shim. Owns all config writes. | Postgres + NATS |
+| `dnsdave-sync` | Rust | Blocklist downloader + parser. | Postgres + NATS + HTTP (lists) |
+| `dnsdave-log` | Rust | Query log consumer. Bulk-writes to Postgres. | NATS + Postgres |
+| `dnsdave-stats` | Rust | Stats aggregator. Maintains in-memory counters. | NATS |
+| `dnsdave-dhcp` | **Rust** | DHCPv4/DHCPv6 server. Publishes lease events. Dynamic DNS via NATS. | NATS + Postgres |
+| `nats` | — | Event bus. Core pub/sub + JetStream + Object Store + KV Store. | — |
 | `postgres` | — | Primary persistent storage. | — |
 
 ### 3.3 Key Design Principles
 
-**The DNS container never touches the database.** It derives its entire runtime state (blocklist, local records, upstreams, allowlist) from events consumed from NATS JetStream. On startup it replays JetStream history to rebuild state from the beginning of time, without touching Postgres. This means `dnsdave-dns` can scale to N instances with no additional configuration.
+**The DNS container never touches the database.** It derives its entire runtime state (blocklist, local records, upstreams, allowlist, DHCP lease-generated records) from NATS. On startup it replays JetStream history to rebuild state without touching Postgres. `dnsdave-dns` can scale to N instances with no additional configuration.
 
-**The DNS container offloads all side-effects.** Query log writes, stats updates, and any future integrations are downstream consumers of the `dnsdave.query.*` subject. The DNS hot path fires a NATS publish (a non-blocking memory write to the client buffer) and moves on. If NATS is momentarily unavailable, query events fall back to the local ring buffer.
+**The DNS container offloads all side-effects.** Query log writes, stats updates, dynamic DNS from DHCP leases, and any future integrations are downstream consumers of NATS subjects. The hot path fires a non-blocking NATS publish and moves on.
 
-**New functionality = new consumer.** Want to add alerting when a client queries a malware domain? Add a container that subscribes to `dnsdave.query.*` and filters. Want to push stats to InfluxDB? New container, new subscription. The DNS and API containers are never modified.
+**New functionality = new consumer.** Alerting, webhooks, InfluxDB export, SIEM integration — all are new containers subscribing to the bus. The DNS and API containers are never modified.
 
 ---
 
@@ -122,76 +129,73 @@ graph TD
 | At-most-once delivery | Core NATS pub/sub |
 | At-least-once delivery | JetStream consumers |
 
-NATS is orders of magnitude lighter than Kafka or Redpanda for this workload. A single NATS node handles millions of messages per second with sub-millisecond latency. JetStream clustering gives you HA with 3 nodes when needed.
-
 ### 4.2 Subject Hierarchy
 
 ```
 dnsdave.
-├── query.                            # DNS query log events
-│   └── {client_group_id}            #   e.g. dnsdave.query.default
-│                                    #   Delivery: core NATS (at-most-once)
-│                                    #   Volume: one message per DNS query
+├── query.
+│   └── {client_group_id}            # DNS query log events
+│                                    # Delivery: core NATS (at-most-once)
 │
-├── config.                          # Control plane config changes
-│   ├── record.{action}              #   action: created | updated | deleted
+├── config.
+│   ├── record.{action}              # action: created | updated | deleted
 │   ├── list.{action}
 │   ├── upstream.{action}
 │   ├── client.{action}
 │   ├── group.{action}
 │   └── system.{action}
-│                                    #   Delivery: JetStream (at-least-once)
-│                                    #   Retention: all (replay from seq 0 on node start)
+│                                    # Delivery: JetStream (at-least-once)
+│                                    # Retention: all (replay from seq 0 on node start)
 │
 ├── blocklist.
-│   ├── diff.{list_id}               #   domain add/remove diff batch
-│   └── ready.{list_id}              #   sync complete; bloom filter published
-│                                    #   Delivery: JetStream (at-least-once)
-│                                    #   Retention: last value per list_id (KV semantics)
+│   ├── diff.{list_id}               # domain add/remove diff batch
+│   └── ready.{list_id}             # sync complete; bloom filter published
+│                                    # Delivery: JetStream (at-least-once)
+│
+├── dhcp.
+│   ├── lease.assigned.{scope_id}   # new or renewed lease (JetStream, at-least-once)
+│   ├── lease.released.{scope_id}   # client sent RELEASE (JetStream)
+│   ├── lease.expired.{scope_id}    # lease timer expired (JetStream)
+│   └── discover.{scope_id}         # DISCOVER received (core, analytics only)
+│                                    # Delivery: JetStream for lease.* ; core for discover
 │
 └── upstream.
-    └── health.{upstream_id}         #   healthy | degraded | down
-                                     #   Delivery: core NATS
+    └── health.{upstream_id}         # healthy | degraded | down (core)
 ```
 
 ### 4.3 JetStream Streams
 
 | Stream | Subjects | Retention | Purpose |
 |--------|----------|-----------|---------|
-| `DNSDAVE_CONFIG` | `dnsdave.config.>` | All messages (no limit) | Config replay for new/restarted DNS nodes |
-| `DNSDAVE_BLOCKLIST` | `dnsdave.blocklist.>` | Last per subject | Blocklist diff replay; new nodes apply all diffs since last full sync |
-| `DNSDAVE_QUERYLOG` | `dnsdave.query.>` | 24h rolling window | Optional audit / replay for log writer catch-up |
+| `DNSDAVE_CONFIG` | `dnsdave.config.>` | All messages | Config replay for new/restarted DNS nodes |
+| `DNSDAVE_BLOCKLIST` | `dnsdave.blocklist.>` | Last per subject | Blocklist diff replay |
+| `DNSDAVE_DHCP` | `dnsdave.dhcp.lease.>` | 90 days | Lease history; replayed by DNS nodes for dynamic record state |
+| `DNSDAVE_QUERYLOG` | `dnsdave.query.>` | 24h rolling | Audit / log writer catch-up |
 
 ### 4.4 NATS Object Store (Bloom Filters)
 
-After a blocklist sync, `dnsdave-sync` serialises the updated bloom filter and uploads it to the **NATS Object Store** bucket `DNSDAVE_BLOOM` with key `bloom.{list_id}`. This is a binary blob (typically 10–100 MB per list) that NATS chunks and stores internally.
-
-When a `dnsdave.blocklist.ready.{list_id}` event arrives, `dnsdave-dns` fetches the bloom filter object, deserialises it into a new `BloomFilter` struct, and atomically swaps the pointer. The old filter is dropped. No file system, no Postgres, no custom chunking code needed.
+After a blocklist sync, `dnsdave-sync` serialises the bloom filter and uploads it to the `DNSDAVE_BLOOM` Object Store bucket. When a `dnsdave.blocklist.ready.*` event arrives, `dnsdave-dns` fetches the object, deserialises it, and atomically swaps the pointer.
 
 ### 4.5 NATS KV Store (Runtime Config)
 
-Frequently-read, rarely-changed config (upstream list, client-to-group mapping, allowlist) is mirrored into a **NATS KV Store** bucket `DNSDAVE_RUNTIME`. The DNS container watches this bucket for changes via a NATS watcher — when a key changes, it triggers a copy-on-write rebuild of the relevant in-memory structure and an atomic pointer swap.
-
-This eliminates any polling and gives sub-10ms config propagation to all DNS nodes with no direct Postgres dependency.
+Frequently-read, rarely-changed config (upstream list, client-to-group map, allowlist, DHCP scopes) is mirrored into `DNSDAVE_RUNTIME`. DNS and DHCP containers watch this bucket for changes; updates trigger copy-on-write rebuilds and atomic pointer swaps with sub-10ms propagation.
 
 ### 4.6 Query Event Schema
 
-Each DNS query produces one event published to `dnsdave.query.{client_group_id}`. The payload is a compact MessagePack-encoded struct (not JSON — avoids allocation overhead in the hot path):
-
 ```rust
 struct QueryEvent {
-    ts_us:         u64,    // unix timestamp, microseconds
-    client_ip:     [u8; 16], // IPv4-mapped IPv6
-    client_id:     u32,    // index into client table (0 = unknown)
+    ts_us:         u64,
+    client_ip:     [u8; 16],   // IPv4-mapped IPv6
+    client_id:     u32,
     domain_len:    u8,
-    domain:        [u8; 253], // DNS name, lowercased
-    qtype:         u16,    // DNS QTYPE
-    response_type: u8,     // 0=allowed 1=blocked 2=cached 3=nxdomain 4=noerror
-    matched_id:    u32,    // list_id or record_id; 0 = none
-    upstream_id:   u8,     // 0 = no upstream used
-    latency_us:    u32,    // query latency in microseconds
+    domain:        [u8; 253],
+    qtype:         u16,
+    response_type: u8,         // 0=allowed 1=blocked 2=cached 3=nxdomain 4=noerror
+    matched_id:    u32,
+    upstream_id:   u8,
+    latency_us:    u32,
 }
-// ~300 bytes packed; NATS publish is a memcpy to client buffer
+// ~300 bytes packed (MessagePack); NATS publish is a memcpy to client buffer
 ```
 
 ### 4.7 DNS Container Startup Sequence
@@ -206,7 +210,7 @@ sequenceDiagram
     participant OBJ as NATS Object Store
 
     DNS->>KV: Fetch DNSDAVE_RUNTIME bucket
-    KV-->>DNS: upstream list · client/group map · allowlist
+    KV-->>DNS: upstream list · client/group map · allowlist · DHCP scope map
     Note over DNS: Build upstream pool, CIDR table, allowlist map
 
     DNS->>JS: Subscribe DNSDAVE_CONFIG from seq 0
@@ -217,6 +221,10 @@ sequenceDiagram
     JS-->>DNS: Replay all blocklist diffs
     Note over DNS: Build blocklist hash map
 
+    DNS->>JS: Subscribe DNSDAVE_DHCP from seq 0
+    JS-->>DNS: Replay lease events (90-day window)
+    Note over DNS: Build dynamic DNS records from DHCP leases
+
     loop per enabled list
         DNS->>OBJ: Fetch bloom.{list_id}
         OBJ-->>DNS: Serialised bloom filter bytes
@@ -226,30 +234,27 @@ sequenceDiagram
     Note over DNS: Begin serving on :53
     DNS->>JS: Subscribe dnsdave.config.> (live updates)
     DNS->>JS: Subscribe dnsdave.blocklist.> (live updates)
+    DNS->>JS: Subscribe dnsdave.dhcp.lease.> (live updates)
     Note over DNS: Publish dnsdave.query.* per query
 ```
 
-Total cold-start time target: **<10 seconds** for a 5M-domain blocklist (dominated by bloom filter fetch + deserialise, ~3–5s).
-
 ### 4.8 Extensibility — Adding New Consumers
-
-The event bus is the extension point. No existing container is modified.
 
 | Future feature | New consumer subscribes to |
 |---------------|---------------------------|
-| Malware domain alerting | `dnsdave.query.*`, filters on `response_type=blocked` + threat list |
+| Malware domain alerting | `dnsdave.query.*`, filter on `response_type=blocked` |
 | Slack / webhook notifications | Same as above |
-| InfluxDB / Grafana metrics | `dnsdave.query.*`, aggregates counters |
+| InfluxDB / Grafana metrics | `dnsdave.query.*`, aggregate counters |
 | SIEM / audit log export | `DNSDAVE_QUERYLOG` JetStream with durable consumer |
-| DHCP lease registration | New producer publishes `dnsdave.config.record.created` |
-| RPZ zone export | `dnsdave.blocklist.*` consumer that generates a zone file |
-| Rate limit enforcement | `dnsdave.query.*` consumer publishes block rules back via KV |
+| DHCP lease audit trail | `DNSDAVE_DHCP` JetStream with durable consumer |
+| RPZ zone export | `dnsdave.blocklist.*` consumer that generates zone files |
+| Rate limit enforcement | `dnsdave.query.*` → publishes block rules back via KV |
 
 ---
 
 ## 5. Performance Architecture
 
-Performance is a first-class design constraint, not an afterthought. Every decision in this section is motivated by the goal of matching or exceeding Pi-hole FTL's query throughput while operating entirely in user-space Rust.
+Performance is a first-class design constraint. Every decision in this section targets matching or exceeding Pi-hole FTL's query throughput while operating entirely in user-space Rust.
 
 ### 5.1 Hot Path — Query Lifecycle
 
@@ -276,100 +281,71 @@ flowchart TD
     J --> K(["Cache answer · Encode response\nPublish QueryEvent → NATS\nReturn buffer"])
 ```
 
-The NATS publish in steps 7, 8, and 10 is a **non-blocking write to the async-nats client buffer**. It does not cross a network boundary on the query hot path. The async-nats client flushes the buffer to the NATS socket in a background Tokio task.
+The NATS publish in steps 7, 8, and 10 is a **non-blocking write to the async-nats client buffer** — no syscall, no network boundary on the hot path.
 
 ### 5.2 UDP I/O — Multi-Socket with SO_REUSEPORT
 
-N Tokio tasks (one per CPU core) each own a UDP socket bound to `:53` with `SO_REUSEPORT`. The kernel distributes packets across sockets via a consistent hash of source IP + port. No userspace lock on the receive path.
+N Tokio tasks (one per CPU core) each own a UDP socket bound to `:53` with `SO_REUSEPORT`. The kernel distributes packets across sockets via consistent hash of source IP + port — no userspace lock on the receive path.
 
-On Linux: `recvmmsg`/`sendmmsg` batch I/O via the `nix` crate — up to 64 packets per syscall.  
+On Linux: `recvmmsg`/`sendmmsg` batch I/O (up to 64 packets per syscall).  
 On macOS (dev): standard `recv_from` / `send_to` fallback.
 
 ### 5.3 Zero-Allocation Hot Path
 
-All byte buffers for DNS message parsing and encoding are managed by a pool. Two tiers:
+All byte buffers are managed through `sync.Pool`-equivalent Tokio channels. Two tiers:
 
 | Pool | Size | Use |
 |------|------|-----|
 | Small | 512 bytes | Standard DNS queries |
 | Large | 4096 bytes | EDNS0 / large responses |
 
-Buffers are borrowed on query entry and returned on exit. No heap allocation occurs during normal query processing.
-
 ### 5.4 Lock-Free Data Structures (Rust)
 
-All hot-path lookups use `Arc<_>` + `ArcSwap` (from the `arc-swap` crate) — the Rust equivalent of `atomic.Pointer`. Writers build a new structure, swap the Arc, and drop the old one when the reference count reaches zero. Readers load the Arc with a single atomic instruction — no locks, no waits.
+All hot-path lookups use `ArcSwap` — readers load an Arc with a single atomic instruction. Writers do full copy-on-write in the background, then call `ArcSwap::store()`. No locks, no waits on the query path.
 
 | Structure | Rust type | Update strategy |
 |-----------|-----------|-----------------|
 | Bloom filter | `ArcSwap<BloomFilter>` | Swap on NATS Object Store fetch |
-| Blocklist map | `ArcSwap<HashMap<DomainKey, u64>>` | Swap on blocklist diff apply |
+| Blocklist map | `ArcSwap<BoomPHF<DomainKey>>` | Swap on blocklist diff |
 | Allowlist set | `ArcSwap<HashSet<DomainKey>>` | Swap on config event |
-| Local records map | `ArcSwap<HashMap<DomainKey, Vec<Record>>>` | Swap on config event |
+| Local records map | `ArcSwap<HashMap<DomainKey, Vec<Record>>>` | Swap on config or DHCP lease event |
 | Wildcard trie | `ArcSwap<LabelTrie>` | Swap on config event |
 
 ### 5.5 Blocklist In-Memory Layout
 
-**Stage 1 — Bloom filter:** `hashbrown`-backed counting Bloom filter with `k=10` xxHash3 functions. FPR of ~0.001% at 5M domains, ~90MB. A negative is definitive — no further lookup. Held behind `ArcSwap`.
+**Stage 1 — Bloom filter:** `k=10` xxHash3 functions; FPR ~0.001% at 5M domains; ~90MB. A negative is definitive — no further lookup needed.
 
-**Stage 2 — Perfect hash map:** For the confirmed-positive path, the blocklist map is built with `boomphf` (Backyard Hashing — Minimal Perfect Hashing). Since the map is immutable between syncs, a minimal perfect hash eliminates all collisions and gives O(1) lookup with ~3 bits/entry storage. For 5M domains: ~2MB for the MPHF index + ~40MB for the value array. Total: ~42MB vs ~300MB for a standard HashMap.
+**Stage 2 — Minimal Perfect Hash map:** `boomphf` eliminates all collisions. ~3 bits/entry; 5M domains ≈ 42MB. The map is immutable after construction — Go's map has no synchronisation overhead: reads are concurrent-safe because the map is never mutated.
 
 ### 5.6 Blocklist Parser — Streaming, Zero-Copy
 
-- Stream-read HTTP response body; transparent gzip/zstd decompression inline.
-- `memchr` crate for SIMD-accelerated newline scanning (AVX2 on x86_64, NEON on ARM64).
-- In-place lowercase via a `[u8; 256]` lookup table.
-- Domain validation via direct byte scan — no regex, no allocation per line.
-- Multiple list sources fetched and parsed concurrently with Tokio tasks; results fanned into a shared concurrent dedup set.
-
-**Target parse rates:**
+- Stream-read HTTP response body; transparent gzip/zstd decompression.
+- `memchr` crate SIMD-accelerated newline scanning (AVX2 on x86_64, NEON on ARM64).
+- In-place lowercase via 256-byte lookup table; no regex; no per-line allocation.
+- Multiple lists fetched and parsed concurrently with Tokio tasks.
 
 | List | Size | Target |
 |------|------|--------|
 | StevenBlack unified | ~160K domains | <200ms |
 | OISD big | ~1M domains | <1s |
-| Hagezi multi pro++ | ~700K domains | <800ms |
 | All lists combined (5M unique) | — | <3s cold; <1s incremental |
 
 ### 5.7 Answer Cache — moka
 
-The answer cache uses `moka` — a high-performance concurrent cache for Rust modelled on Caffeine (Java). It uses a window TinyLFU policy that outperforms LRU for DNS access patterns (power-law domain distribution). Internally sharded; no global lock.
+`moka` concurrent cache with Window TinyLFU policy, internally sharded. TTL-aware eviction; negative caching (NXDOMAIN/NODATA per RFC 2308); cache pre-warming from `DNSDAVE_QUERYLOG` replay on startup.
 
-- TTL-aware eviction; negative caching (NXDOMAIN/NODATA per RFC 2308).
-- Cache pre-warming on startup by replaying recent `DNSDAVE_QUERYLOG` events from JetStream.
+### 5.8 Performance Targets
 
-### 5.8 NATS Publish — Impact on Hot Path
-
-The `async-nats` client maintains an internal send buffer (a Tokio MPSC channel). Publishing a query event is a non-blocking channel send — equivalent to a single atomic write. The actual network send to the NATS socket happens in a background Tokio task. This means:
-
-- **No syscall** on the DNS hot path for query logging.
-- **No DNS latency added** by the NATS publish.
-- **Backpressure handling**: if the NATS client buffer fills (NATS unreachable), the DNS container falls back to the local ring buffer. Query serving never blocks.
-
-### 5.9 Performance Targets
-
-| Metric | Target | Condition |
-|--------|--------|-----------|
-| Blocked query latency (p50) | <100 µs | Bloom filter negative |
-| Blocked query latency (p99) | <150 µs | No GC pauses (Rust) |
-| Local record latency (p50) | <80 µs | HashMap hit |
-| Cache hit latency (p50) | <150 µs | moka hit |
-| Cache miss latency (p50) | <5 ms | DoH upstream, LAN |
-| Throughput (blocked/cached) | >800K QPS | 4-core host, UDP LAN |
-| Throughput (upstream) | >50K QPS | Network RTT bound |
-| Blocklist parse (1M domains) | <1s | Cold sync |
-| Bloom filter hot-swap (5M) | <5s | Background; zero downtime |
-| NATS query event publish | <1 µs | Non-blocking buffer write |
-| DNS container cold start | <10s | 5M domain blocklist, from NATS |
-| RSS (5M domain blocklist, MPHF) | <250MB | vs ~650MB with Go + HashMap |
-
-### 5.10 Benchmarking & Profiling
-
-- `cargo bench` — criterion-based microbenchmarks for each hot-path stage.
-- `make bench-dns` — spins up the stack and runs `flamethrower`/`dnsperf` for QPS + latency distribution.
-- `cargo flamegraph` / `perf` — CPU profiling.
-- pprof-compatible endpoints available in `debug` build via `tokio-console`.
-- Benchmark results recorded in `benchmarks/` and committed; CI fails on >5% regression.
+| Metric | Target |
+|--------|--------|
+| Blocked query latency (p50) | <100 µs |
+| Blocked query latency (p99) | <150 µs (no GC) |
+| Cache hit latency (p50) | <150 µs |
+| Cache miss latency (p50) | <5 ms (upstream RTT) |
+| Throughput (blocked/cached) | >800K QPS on 4 cores |
+| NATS query event publish | <1 µs (buffer write) |
+| DNS container cold start | <10s (5M domain blocklist, from NATS) |
+| RSS (5M domain blocklist, MPHF) | <300 MB |
 
 ---
 
@@ -379,55 +355,32 @@ The `async-nats` client maintains an internal send buffer (a Tokio MPSC channel)
 
 | Type | Scope | Notes |
 |------|-------|-------|
-| `A` | Local zone | IPv4 override or custom record |
-| `AAAA` | Local zone | IPv6 override |
+| `A` | Local zone | IPv4; auto-created from DHCP leases |
+| `AAAA` | Local zone | IPv6; auto-created from DHCPv6 leases |
 | `CNAME` | Local zone | Chained resolution |
 | `MX` | Local zone | Mail routing |
-| `TXT` | Local zone | Arbitrary; useful for split-horizon Let's Encrypt |
-| `PTR` | Local zone | Reverse DNS for local hosts |
-| `SRV` | Local zone | Service discovery (Kubernetes-style) |
+| `TXT` | Local zone | Arbitrary; split-horizon Let's Encrypt |
+| `PTR` | Local zone | Reverse DNS; auto-created from DHCP leases |
+| `SRV` | Local zone | Service discovery |
 | Wildcard `*` | Local zone | See §6.2 |
 
 ### 6.2 Wildcard DNS
 
-A record with a name of `*.internal.example.com` matches any single label prefix that does not have a more-specific record. Resolution priority:
+Resolution priority:
 
 ```
 exact match  >  wildcard match (longest suffix wins)  >  blocklist check  >  upstream
 ```
 
-Examples (given `*.internal.example.com → 10.0.0.50`):
-
-| Query | Result |
-|-------|--------|
-| `api.internal.example.com` | `10.0.0.50` (wildcard) |
-| `db.internal.example.com` | `10.0.0.50` (wildcard) |
-| `db.internal.example.com` with explicit `A` record `10.0.0.51` | `10.0.0.51` (exact wins) |
-| `nested.api.internal.example.com` | forwarded upstream (single-label by default) |
-
-A `recursive_wildcard` flag enables multi-label matching (`**.internal.example.com` semantics).
-
-**Wildcard trie:** Keyed right-to-left by DNS label. Copy-on-write; published via `ArcSwap`. Updated by consuming `dnsdave.config.record.*` events from NATS.
+A `recursive_wildcard` flag enables multi-label matching. The wildcard trie is keyed right-to-left by DNS label, copy-on-write, published via `ArcSwap`.
 
 ### 6.3 Split-Horizon / Views
 
-Named views allow different responses for different client groups. View assignment is based on client IP/CIDR, looked up in the CIDR table on each query. The CIDR table is a small `Vec<(IpNet, ViewId)>` loaded from the NATS KV Store.
+Named views assign different responses to different client groups. View assignment is based on client IP/CIDR, resolved from the CIDR table on each query.
 
 ### 6.4 Upstream Resolver Configuration
 
-```jsonc
-// POST /api/v1/upstreams
-{
-  "name": "cloudflare-doh",
-  "type": "doh",
-  "address": "https://1.1.1.1/dns-query",
-  "priority": 1,
-  "timeout_ms": 2000,
-  "health_check_interval_s": 30
-}
-```
-
-DoH upstreams use persistent HTTP/2 connections (one connection per upstream, multiplexed via Tokio). Health is checked continuously; state is published to `dnsdave.upstream.health.*` for all consumers to observe.
+DoH upstreams use persistent HTTP/2 connections (one per upstream, multiplexed). Health-checked continuously; state published to `dnsdave.upstream.health.*`.
 
 ---
 
@@ -491,13 +444,206 @@ Allowlist entries are evaluated before the blocklist and cannot be overridden by
 
 ### 7.5 Pi-hole API Compatibility Layer
 
-A `/api/pihole/` shim in `dnsdave-api` exposes the Pi-hole v5/v6 admin API surface so that existing clients (browser extensions, iOS/Android apps, Grafana datasources) work without modification.
+A `/api/pihole/` shim in `dnsdave-api` exposes the Pi-hole v5/v6 admin API surface.
 
 ---
 
-## 8. REST API Design
+## 8. DHCP Feature Set
 
-### 8.1 Principles
+### 8.1 Overview
+
+`dnsdave-dhcp` is a first-class DHCPv4 and DHCPv6 server integrated with the DNS data plane via NATS JetStream. When a lease is assigned, DNS `A`/`AAAA` and `PTR` records are automatically created in all `dnsdave-dns` instances — no manual registration, no polling. Releasing or expiring a lease removes the records.
+
+### 8.2 Protocol Support
+
+| Protocol | State Machine | Transport |
+|----------|--------------|-----------|
+| DHCPv4 | DISCOVER → OFFER → REQUEST → ACK/NAK (DORA) | UDP :67 broadcast + unicast |
+| DHCPv6 | SOLICIT → ADVERTISE → REQUEST → REPLY (SARR) | UDP :547 multicast + unicast |
+| DHCPv6 IA_NA | Non-temporary address assignment | — |
+| DHCPv6 IA_PD | Prefix delegation | — |
+| PXE (BIOS + UEFI) | Auto-detection via option 93 | — |
+| DHCP Relay | RFC 3046 giaddr + option 82 | — |
+
+### 8.3 Scopes and Pools
+
+A scope defines a subnet with an allocatable address pool:
+
+```jsonc
+// POST /api/v1/dhcp/scopes
+{
+  "name": "LAN",
+  "subnet": "192.168.1.0/24",
+  "pool": { "start": "192.168.1.100", "end": "192.168.1.200" },
+  "gateway": "192.168.1.1",
+  "lease_time_s": 86400,
+  "domain_name": "home.arpa",
+  "domain_search": ["home.arpa", "corp.example.com"],
+  "dns_servers": ["192.168.1.53"],   // auto-set to dnsdave-dns IP if omitted
+  "ntp_servers": ["192.168.1.1"],
+  "enabled": true
+}
+```
+
+Multiple non-overlapping scopes per instance. Scope selection for relay clients uses `giaddr`.
+
+### 8.4 DHCP Options Hierarchy
+
+Options are evaluated in this priority order (highest wins):
+
+```
+Reservation options
+    > Client Class options
+        > Scope options
+            > Global options
+```
+
+This allows precise targeting — Cisco switches in scope `LAN` get option 66 (TFTP server); all other clients in the same scope do not.
+
+### 8.5 Supported DHCPv4 Options
+
+All standard RFC options are supported. Key options with first-class handling:
+
+| Code | Name | Notes |
+|------|------|-------|
+| 1 | Subnet Mask | Auto-derived from scope subnet |
+| 3 | Router | Default gateway |
+| 6 | DNS Servers | Auto-set to `dnsdave-dns` IP if not overridden |
+| 12 | Hostname | From reservation, or client-supplied and sanitised |
+| 15 | Domain Name | From scope |
+| 26 | Interface MTU | Configurable per scope |
+| 28 | Broadcast Address | Auto-derived |
+| 33 | Static Routes | Legacy format |
+| 42 | NTP Servers | Pool or specific IPs |
+| 43 | Vendor-Specific | Raw bytes; applied per vendor class |
+| 44 | NBNS (WINS) Servers | Legacy Windows environments |
+| 51 | Lease Time | From scope or reservation |
+| 58 | Renewal Time (T1) | Default 50% of lease time |
+| 59 | Rebinding Time (T2) | Default 87.5% of lease time |
+| 66 | TFTP Server Name | PXE boot |
+| 67 | Bootfile Name | PXE; auto BIOS (`pxelinux.0`) vs UEFI (`bootx64.efi`) via option 93 |
+| 93 | Client System Architecture | Auto-detect BIOS vs UEFI for PXE |
+| 119 | Domain Search List | Multi-domain search |
+| 121 | Classless Static Routes | RFC 3442; preferred over option 33 |
+| 150 | Cisco TFTP Server | Cisco-specific PXE |
+| 252 | WPAD | Web proxy auto-discovery |
+| Any | Custom (raw hex) | Vendor-specific / exotic options; stored and served as-is |
+
+### 8.6 Supported DHCPv6 Options
+
+| Code | Name | Notes |
+|------|------|-------|
+| 23 | DNS Recursive Name Server | Auto-set to `dnsdave-dns` IPv6 if not overridden |
+| 24 | Domain Search List | — |
+| 31 | SNTP Servers | — |
+| 56 | NTP Server | RFC 5908 |
+| 59 | Boot File URL | PXEv6 |
+| 60 | Boot File Parameters | PXEv6 arguments |
+
+### 8.7 Static Reservations
+
+A reservation binds a MAC address (DHCPv4) or DUID (DHCPv6) to a fixed IP and optional per-host options:
+
+```jsonc
+// POST /api/v1/dhcp/reservations
+{
+  "name": "NAS",
+  "mac": "aa:bb:cc:dd:ee:ff",
+  "ip": "192.168.1.10",
+  "hostname": "nas",
+  "scope_id": "scope_lan",
+  "options": {
+    "42": ["192.168.1.1"],      // dedicated NTP for this host
+    "66": "192.168.1.10"        // TFTP (PXE) for this host only
+  }
+}
+```
+
+### 8.8 Client Classes and Vendor Matching
+
+Client classes allow conditional option delivery based on DHCP option values:
+
+```jsonc
+// POST /api/v1/dhcp/classes
+{
+  "name": "PXEClient-UEFI",
+  "match": "option[93].hex == '0007'",  // architecture = EFI BC
+  "options": {
+    "67": "bootx64.efi"
+  }
+}
+```
+
+Built-in class matchers: vendor-class-id prefix, option 93 architecture, hardware type, relay circuit ID.
+
+### 8.9 PXE / Network Boot
+
+PXE is configured per-scope or per-reservation with automatic BIOS/UEFI detection:
+
+```jsonc
+{
+  "pxe": {
+    "tftp_server": "192.168.1.10",
+    "boot_file_bios": "pxelinux.0",
+    "boot_file_uefi": "bootx64.efi",
+    "architecture_detection": true    // reads option 93; no separate scopes needed
+  }
+}
+```
+
+### 8.10 DHCP Relay Support
+
+Clients on remote subnets reach `dnsdave-dhcp` via any RFC 3046-compliant relay agent. The server reads `giaddr` to select the correct scope automatically. Option 82 (agent circuit ID) is logged with each lease for full auditability.
+
+### 8.11 Dynamic DNS Registration
+
+When a lease is assigned, DNS records are created automatically across all DNS nodes via NATS:
+
+```mermaid
+sequenceDiagram
+    participant C as DHCP Client
+    participant DHCP as dnsdave-dhcp
+    participant PG as PostgreSQL
+    participant JS as NATS JetStream
+    participant DNS as dnsdave-dns (all nodes)
+
+    C->>DHCP: DHCPDISCOVER
+    DHCP->>PG: Allocate IP · write pending lease
+    DHCP->>C: DHCPOFFER
+    C->>DHCP: DHCPREQUEST
+    DHCP->>PG: Confirm lease · write dhcp_leases
+    DHCP->>JS: Publish dnsdave.dhcp.lease.assigned.{scope_id}
+    DHCP->>C: DHCPACK (IP + all options)
+
+    JS-->>DNS: lease.assigned event (all nodes simultaneously)
+    Note over DNS: Create A: hostname.domain → IP (TTL = lease_time_s)<br/>Create PTR: reverse.in-addr.arpa → hostname.domain<br/>ArcSwap local records map
+```
+
+On lease expiry or DHCPRELEASE, a `lease.expired` / `lease.released` event causes all DNS nodes to remove the corresponding records.
+
+### 8.12 DHCP Lease Event Schema
+
+```rust
+struct LeaseEvent {
+    ts_us:       u64,
+    event_type:  u8,        // 0=assigned 1=released 2=expired 3=renewed
+    scope_id:    u32,
+    mac:         [u8; 6],
+    ip:          [u8; 16],  // IPv4-mapped IPv6
+    hostname:    [u8; 64],
+    domain:      [u8; 128],
+    lease_end_s: u64,       // unix timestamp; 0 = released/expired
+    is_v6:       bool,
+    client_id:   [u8; 128], // DUID for DHCPv6
+}
+// ~420 bytes packed (MessagePack)
+```
+
+---
+
+## 9. REST API Design
+
+### 9.1 Principles
 
 - **OpenAPI 3.1** spec is the source of truth; server stubs are generated from it.
 - All endpoints are under `/api/v1/`.
@@ -505,9 +651,9 @@ A `/api/pihole/` shim in `dnsdave-api` exposes the Pi-hole v5/v6 admin API surfa
 - Pagination via `?page=` + `?per_page=`; filtering via `?q=` and `?type=`.
 - Bulk operations supported on all list/record endpoints.
 - Every mutating operation is idempotent via `PUT`; `POST` creates-or-updates by natural key.
-- After every write, `dnsdave-api` publishes the appropriate `dnsdave.config.*` event to NATS before returning 200 to the client.
+- After every write, `dnsdave-api` publishes the appropriate `dnsdave.config.*` event to NATS before returning 200.
 
-### 8.2 Resource Map
+### 9.2 Resource Map
 
 ```
 /api/v1/
@@ -531,11 +677,38 @@ A `/api/pihole/` shim in `dnsdave-api` exposes the Pi-hole v5/v6 admin API surfa
 │   ├── PUT    /:id
 │   ├── DELETE /:id
 │   └── POST   /:id/sync
+├── dhcp/
+│   ├── scopes/
+│   │   ├── GET    /
+│   │   ├── POST   /
+│   │   ├── GET    /:id
+│   │   ├── PUT    /:id
+│   │   └── DELETE /:id
+│   ├── options/                  # global + per-scope DHCP options
+│   │   ├── GET    /
+│   │   ├── POST   /
+│   │   ├── PUT    /:id
+│   │   └── DELETE /:id
+│   ├── reservations/
+│   │   ├── GET    /
+│   │   ├── POST   /
+│   │   ├── GET    /:id
+│   │   ├── PUT    /:id
+│   │   └── DELETE /:id
+│   ├── classes/                  # vendor / client class matching rules
+│   │   ├── GET    /
+│   │   ├── POST   /
+│   │   ├── PUT    /:id
+│   │   └── DELETE /:id
+│   └── leases/
+│       ├── GET    /              # active lease table (paginated)
+│       ├── DELETE /:id           # force-release a lease
+│       └── GET    /stream        # SSE stream of lease events
 ├── clients/
 ├── groups/
 ├── logs/
-│   ├── GET    /               # paginated (reads Postgres via dnsdave-log)
-│   └── GET    /stream         # SSE live tail (reads NATS dnsdave.query.*)
+│   ├── GET    /                  # paginated query log
+│   └── GET    /stream            # SSE live tail (NATS dnsdave.query.*)
 ├── stats/
 │   ├── GET    /summary
 │   ├── GET    /top-domains
@@ -549,7 +722,7 @@ A `/api/pihole/` shim in `dnsdave-api` exposes the Pi-hole v5/v6 admin API surfa
     └── GET    /config
 ```
 
-### 8.3 Authentication
+### 9.3 Authentication
 
 | Method | Use Case |
 |--------|----------|
@@ -557,28 +730,31 @@ A `/api/pihole/` shim in `dnsdave-api` exposes the Pi-hole v5/v6 admin API surfa
 | `Authorization: Bearer <jwt>` | Short-lived sessions, UI |
 | mTLS (optional) | Kubernetes service-to-service |
 
-### 8.4 Live Log Stream
+### 9.4 Live Streams
 
-`GET /api/v1/logs/stream` is a Server-Sent Events endpoint that subscribes directly to `dnsdave.query.*` in NATS and streams decoded events to the client. This bypasses Postgres entirely — zero storage overhead for the live tail path. Supports `?client=`, `?domain=`, `?type=blocked` query filters applied server-side before forwarding to the SSE client.
+`GET /api/v1/logs/stream` — SSE; subscribes to `dnsdave.query.*` in NATS. Zero Postgres reads.  
+`GET /api/v1/dhcp/leases/stream` — SSE; subscribes to `dnsdave.dhcp.lease.*` in NATS. Live lease activity.
 
 ---
 
-## 9. Data Model
+## 10. Data Model
 
-### 9.1 Core Tables
+### 10.1 Core Tables
 
 ```sql
 CREATE TABLE dns_records (
     id          TEXT PRIMARY KEY,
     view_id     TEXT REFERENCES views(id) ON DELETE SET NULL,
     name        TEXT NOT NULL,
-    type        TEXT NOT NULL,       -- A, AAAA, CNAME, MX, TXT, PTR, SRV
+    type        TEXT NOT NULL,
     value       TEXT NOT NULL,
     priority    INTEGER DEFAULT 0,
     ttl         INTEGER DEFAULT 300,
     wildcard    BOOLEAN DEFAULT FALSE,
     recursive   BOOLEAN DEFAULT FALSE,
     enabled     BOOLEAN DEFAULT TRUE,
+    source      TEXT DEFAULT 'manual',   -- manual | dhcp_lease
+    lease_id    TEXT,                    -- FK to dhcp_leases if source=dhcp_lease
     comment     TEXT,
     created_at  TIMESTAMP DEFAULT NOW(),
     updated_at  TIMESTAMP DEFAULT NOW(),
@@ -610,7 +786,7 @@ CREATE INDEX idx_list_entries_domain ON list_entries(domain);
 
 CREATE TABLE clients (
     id         TEXT PRIMARY KEY,
-    identifier TEXT NOT NULL UNIQUE,   -- IP, CIDR, or MAC
+    identifier TEXT NOT NULL UNIQUE,
     name       TEXT,
     group_id   TEXT REFERENCES groups(id),
     comment    TEXT,
@@ -633,7 +809,7 @@ CREATE TABLE group_lists (
 CREATE TABLE upstreams (
     id                      TEXT PRIMARY KEY,
     name                    TEXT,
-    type                    TEXT NOT NULL,     -- plain | dot | doh
+    type                    TEXT NOT NULL,
     address                 TEXT NOT NULL,
     priority                INTEGER DEFAULT 10,
     timeout_ms              INTEGER DEFAULT 2000,
@@ -666,38 +842,120 @@ CREATE TABLE blocklist_index (
 CREATE INDEX idx_blocklist_domain ON blocklist_index(domain);
 ```
 
-### 9.2 In-Memory Structures (dnsdave-dns)
+### 10.2 DHCP Tables
 
-All structures are derived from NATS — never from direct DB access.
+```sql
+CREATE TABLE dhcp_scopes (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    subnet       CIDR NOT NULL,
+    pool_start   INET NOT NULL,
+    pool_end     INET NOT NULL,
+    gateway      INET,
+    lease_time_s INTEGER NOT NULL DEFAULT 86400,
+    domain_name  TEXT,
+    enabled      BOOLEAN DEFAULT TRUE,
+    comment      TEXT,
+    created_at   TIMESTAMP DEFAULT NOW(),
+    updated_at   TIMESTAMP DEFAULT NOW()
+);
 
-| Structure | Rust Type | Source |
-|-----------|-----------|--------|
-| Bloom filter | `ArcSwap<BloomFilter>` | NATS Object Store |
-| Blocklist MPHF map | `ArcSwap<BoomPHF<DomainKey>>` | NATS Object Store / diff replay |
-| Allowlist set | `ArcSwap<HashSet<DomainKey>>` | NATS KV Store |
-| Local records map | `ArcSwap<HashMap<DomainKey, Vec<Record>>>` | NATS JetStream replay |
-| Wildcard trie | `ArcSwap<LabelTrie>` | NATS JetStream replay |
-| Client CIDR table | `ArcSwap<Vec<(IpNet, ClientId)>>` | NATS KV Store |
-| Answer cache | `moka::Cache<CacheKey, CachedAnswer>` | Local; upstream queries |
-| Query event buffer | Lock-free MPSC ring buffer | NATS flush fallback |
-| Upstream conn pool | `Arc<Mutex<HashMap<UpstreamId, Client>>>` | On startup + config events |
+-- Global options: scope_id IS NULL. Scope options: scope_id set.
+CREATE TABLE dhcp_options (
+    id       TEXT PRIMARY KEY,
+    scope_id TEXT REFERENCES dhcp_scopes(id) ON DELETE CASCADE,
+    code     INTEGER NOT NULL,
+    value    TEXT NOT NULL,    -- JSON-encoded; interpreted by option type
+    enabled  BOOLEAN DEFAULT TRUE,
+    UNIQUE(scope_id, code)
+);
 
-**Memory sizing (5M-domain blocklist, MPHF):**
+CREATE TABLE dhcp_classes (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    match_expr TEXT NOT NULL,  -- e.g. "option[93].hex == '0007'"
+    comment    TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE dhcp_class_options (
+    class_id TEXT NOT NULL REFERENCES dhcp_classes(id) ON DELETE CASCADE,
+    code     INTEGER NOT NULL,
+    value    TEXT NOT NULL,
+    PRIMARY KEY (class_id, code)
+);
+
+CREATE TABLE dhcp_reservations (
+    id         TEXT PRIMARY KEY,
+    scope_id   TEXT NOT NULL REFERENCES dhcp_scopes(id) ON DELETE CASCADE,
+    name       TEXT,
+    mac        MACADDR NOT NULL,
+    duid       TEXT,            -- DHCPv6 DUID (hex string)
+    ip         INET NOT NULL,
+    hostname   TEXT,
+    enabled    BOOLEAN DEFAULT TRUE,
+    comment    TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(scope_id, mac)
+);
+
+CREATE TABLE dhcp_reservation_options (
+    reservation_id TEXT NOT NULL REFERENCES dhcp_reservations(id) ON DELETE CASCADE,
+    code           INTEGER NOT NULL,
+    value          TEXT NOT NULL,
+    PRIMARY KEY (reservation_id, code)
+);
+
+CREATE TABLE dhcp_leases (
+    id             TEXT PRIMARY KEY,
+    scope_id       TEXT NOT NULL REFERENCES dhcp_scopes(id),
+    mac            MACADDR NOT NULL,
+    duid           TEXT,
+    ip             INET NOT NULL UNIQUE,
+    hostname       TEXT,
+    reservation_id TEXT REFERENCES dhcp_reservations(id),
+    assigned_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at     TIMESTAMP NOT NULL,
+    renewed_at     TIMESTAMP,
+    released_at    TIMESTAMP,
+    relay_ip       INET,
+    agent_circuit_id TEXT,     -- option 82 for auditing
+    is_v6          BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX idx_dhcp_leases_mac      ON dhcp_leases(mac);
+CREATE INDEX idx_dhcp_leases_ip       ON dhcp_leases(ip);
+CREATE INDEX idx_dhcp_leases_expires  ON dhcp_leases(expires_at);
+CREATE INDEX idx_dhcp_leases_scope    ON dhcp_leases(scope_id);
+```
+
+### 10.3 In-Memory Structures (dnsdave-dns)
+
+| Structure | Rust Type | Source | Includes |
+|-----------|-----------|--------|---------|
+| Bloom filter | `ArcSwap<BloomFilter>` | NATS Object Store | — |
+| Blocklist MPHF map | `ArcSwap<BoomPHF<DomainKey>>` | NATS Object Store / diff replay | — |
+| Allowlist set | `ArcSwap<HashSet<DomainKey>>` | NATS KV | — |
+| Local records map | `ArcSwap<HashMap<DomainKey, Vec<Record>>>` | NATS JetStream replay | Manual records + DHCP lease records |
+| Wildcard trie | `ArcSwap<LabelTrie>` | NATS JetStream replay | — |
+| Client CIDR table | `ArcSwap<Vec<(IpNet, ClientId)>>` | NATS KV | — |
+| Answer cache | `moka::Cache<CacheKey, CachedAnswer>` | Local upstream queries | — |
+| Query event ring buffer | Lock-free MPSC | NATS fallback | — |
+
+**Memory sizing (5M-domain blocklist + 500 DHCP leases):**
 
 | Component | Estimate |
 |-----------|----------|
-| Bloom filter (FPR 0.001%) | ~90 MB |
+| Bloom filter | ~90 MB |
 | MPHF blocklist index | ~42 MB |
-| moka answer cache (1M entries) | ~150 MB |
-| Local records + wildcard trie | <10 MB |
-| Query event ring buffer | ~5 MB |
-| **Total target RSS** | **~300 MB** |
+| moka answer cache | ~150 MB |
+| Local records + trie (incl. lease records) | <10 MB |
+| **Total RSS** | **~300 MB** |
 
 ---
 
-## 10. Deployment
+## 11. Deployment
 
-### 10.1 Docker Compose (Reference Stack)
+### 11.1 Docker Compose (Reference Stack)
 
 ```yaml
 # docker-compose.yml
@@ -707,10 +965,10 @@ services:
     image: nats:alpine
     container_name: dnsdave-nats
     restart: unless-stopped
-    command: ["-js", "-m", "8222"]   # JetStream enabled + monitoring
+    command: ["-js", "-m", "8222"]
     ports:
-      - "4222:4222"    # client
-      - "8222:8222"    # monitoring (internal only in prod)
+      - "4222:4222"
+      - "8222:8222"
     volumes:
       - nats-data:/data
     networks:
@@ -733,8 +991,7 @@ services:
     image: ghcr.io/dnsdave/dnsdave-dns:latest
     container_name: dnsdave-dns
     restart: unless-stopped
-    depends_on:
-      - nats
+    depends_on: [nats]
     ports:
       - "53:53/udp"
       - "53:53/tcp"
@@ -742,22 +999,36 @@ services:
     environment:
       DNSDAVE_NATS_URL: "nats://nats:4222"
       DNSDAVE_LOG_LEVEL: "info"
-      DNSDAVE_WORKERS: "0"           # 0 = num_cpus
+      DNSDAVE_WORKERS: "0"
     networks:
       - dnsdave
     sysctls:
       net.core.rmem_max: "26214400"
       net.core.wmem_max: "26214400"
 
+  dnsdave-dhcp:
+    image: ghcr.io/dnsdave/dnsdave-dhcp:latest
+    container_name: dnsdave-dhcp
+    restart: unless-stopped
+    depends_on: [nats, postgres]
+    ports:
+      - "67:67/udp"     # DHCPv4
+      - "547:547/udp"   # DHCPv6
+    environment:
+      DNSDAVE_NATS_URL: "nats://nats:4222"
+      DNSDAVE_DB_URL: "postgres://dnsdave:${POSTGRES_PASSWORD}@postgres/dnsdave"
+      DNSDAVE_LOG_LEVEL: "info"
+    networks:
+      - dnsdave
+      - host_network    # needs access to broadcast domain
+
   dnsdave-api:
     image: ghcr.io/dnsdave/dnsdave-api:latest
     container_name: dnsdave-api
     restart: unless-stopped
-    depends_on:
-      - nats
-      - postgres
+    depends_on: [nats, postgres]
     ports:
-      - "8080:8080/tcp"    # REST API + DoH
+      - "8080:8080/tcp"
     environment:
       DNSDAVE_NATS_URL: "nats://nats:4222"
       DNSDAVE_DB_URL: "postgres://dnsdave:${POSTGRES_PASSWORD}@postgres/dnsdave"
@@ -770,9 +1041,7 @@ services:
     image: ghcr.io/dnsdave/dnsdave-sync:latest
     container_name: dnsdave-sync
     restart: unless-stopped
-    depends_on:
-      - nats
-      - postgres
+    depends_on: [nats, postgres]
     environment:
       DNSDAVE_NATS_URL: "nats://nats:4222"
       DNSDAVE_DB_URL: "postgres://dnsdave:${POSTGRES_PASSWORD}@postgres/dnsdave"
@@ -784,9 +1053,7 @@ services:
     image: ghcr.io/dnsdave/dnsdave-log:latest
     container_name: dnsdave-log
     restart: unless-stopped
-    depends_on:
-      - nats
-      - postgres
+    depends_on: [nats, postgres]
     environment:
       DNSDAVE_NATS_URL: "nats://nats:4222"
       DNSDAVE_DB_URL: "postgres://dnsdave:${POSTGRES_PASSWORD}@postgres/dnsdave"
@@ -799,8 +1066,7 @@ services:
     image: ghcr.io/dnsdave/dnsdave-stats:latest
     container_name: dnsdave-stats
     restart: unless-stopped
-    depends_on:
-      - nats
+    depends_on: [nats]
     environment:
       DNSDAVE_NATS_URL: "nats://nats:4222"
       DNSDAVE_LOG_LEVEL: "info"
@@ -814,55 +1080,55 @@ volumes:
 networks:
   dnsdave:
     driver: bridge
+  host_network:
+    driver: host   # dnsdave-dhcp needs to receive broadcast DISCOVER packets
 ```
 
-### 10.2 Minimal Stack (dns + api only)
+> **Note on DHCP networking:** DHCP DISCOVER packets are UDP broadcast and cannot traverse Docker bridge networks by default. `dnsdave-dhcp` should use `network_mode: host` or be run with `--network host` so it receives raw broadcast traffic on port 67. In Kubernetes, use `hostNetwork: true` on the DHCP pod.
 
-For resource-constrained environments (Raspberry Pi, home lab), a `docker-compose.minimal.yml` runs only `dnsdave-dns`, `dnsdave-api`, NATS, and uses SQLite via the API container. Query logging is written directly by `dnsdave-api` (sacrificing throughput for simplicity). Stats are disabled.
+### 11.2 Minimal Stack
 
-### 10.3 Podman Compose
+A `docker-compose.minimal.yml` runs only `dnsdave-dns`, `dnsdave-dhcp`, `dnsdave-api`, and NATS with SQLite. Query logging is written directly by `dnsdave-api`. Stats are disabled.
 
-The same compose files work with `podman-compose` without modification. A quadlet-compatible systemd unit file is provided for rootless Podman with socket activation on port 53 (`CAP_NET_BIND_SERVICE`).
+### 11.3 Podman Compose
 
-### 10.4 Kubernetes / Helm
+The same compose files work with `podman-compose`. Quadlet-compatible unit files are provided for rootless Podman. `dnsdave-dhcp` requires `--cap-add=NET_BIND_SERVICE` and host network access for broadcast.
+
+### 11.4 Kubernetes / Helm
 
 ```
 deploy/helm/dnsdave/
-├── Chart.yaml
-├── values.yaml
 └── templates/
-    ├── deployment-dns.yaml       # DaemonSet (host network, :53)
-    ├── deployment-api.yaml       # Deployment (replicated)
-    ├── deployment-sync.yaml      # Deployment (single replica)
-    ├── deployment-log.yaml       # Deployment (single or replicated)
-    ├── deployment-stats.yaml     # Deployment (single replica)
-    ├── statefulset-nats.yaml     # NATS cluster (3 replicas for JetStream HA)
-    ├── service-dns.yaml          # LoadBalancer :53 or hostPort DaemonSet
-    ├── service-api.yaml          # ClusterIP :8080
-    ├── ingress-api.yaml          # HTTPS ingress for REST API + DoH
-    ├── pvc-nats.yaml
-    ├── pvc-postgres.yaml
-    ├── configmap.yaml
-    ├── secret.yaml
-    ├── hpa-api.yaml              # HPA for API replicas
-    └── servicemonitor.yaml       # Prometheus ServiceMonitor
+    ├── daemonset-dns.yaml        # hostNetwork: true, :53
+    ├── daemonset-dhcp.yaml       # hostNetwork: true, :67/:547
+    ├── deployment-api.yaml       # Deployment, replicated
+    ├── deployment-sync.yaml      # Deployment, single replica
+    ├── deployment-log.yaml       # Deployment
+    ├── deployment-stats.yaml     # Deployment, single replica
+    ├── statefulset-nats.yaml     # 3-node JetStream cluster
+    ├── service-dns.yaml
+    ├── service-api.yaml
+    ├── ingress-api.yaml
+    ├── hpa-api.yaml
+    └── servicemonitor.yaml
 ```
 
-The DNS container runs as a **DaemonSet** with `hostNetwork: true` so it binds the node's port 53 directly. The API container runs as a standard **Deployment** (replicated, behind a ClusterIP service). NATS runs as a 3-node **StatefulSet** with JetStream clustering for HA.
+Both `dnsdave-dns` and `dnsdave-dhcp` run as **DaemonSets** with `hostNetwork: true`. DNS binds port 53; DHCP binds ports 67/547 to receive broadcasts directly on each node.
 
-### 10.5 Scaling the Stack
+### 11.5 Scaling the Stack
 
-| Tier | Scale-out strategy |
-|------|--------------------|
-| `dnsdave-dns` | Add nodes; each subscribes to NATS independently. No coordination needed. |
-| `dnsdave-api` | Scale Deployment replicas behind a load balancer. All replicas share Postgres + NATS. |
-| `dnsdave-log` | Single replica is sufficient. Scale only if Postgres write throughput is saturated. |
-| `dnsdave-stats` | Single replica (in-memory counters). HA via leader election via NATS KV. |
-| `dnsdave-sync` | Single replica (one sync job per list). Leader election via NATS KV prevents duplicate syncs. |
-| `nats` | 3-node JetStream cluster for HA. Scales to 5+ nodes for very high message volume. |
-| `postgres` | Patroni HA (primary + standby). TimescaleDB for `query_log` at very high QPS. |
+| Container | Scale-out strategy |
+|-----------|-------------------|
+| `dnsdave-dns` | Add nodes; each subscribes to NATS independently. No coordination. |
+| `dnsdave-dhcp` | Single active instance per broadcast domain. Leader election via NATS KV prevents duplicate offers. |
+| `dnsdave-api` | Scale replicas behind a load balancer. All share Postgres + NATS. |
+| `dnsdave-log` | Single replica. Scale only if Postgres write throughput saturates. |
+| `dnsdave-stats` | Single replica (in-memory). HA via NATS KV leader election. |
+| `dnsdave-sync` | Single replica. Leader election via NATS KV prevents duplicate syncs. |
+| `nats` | 3-node JetStream cluster for HA. |
+| `postgres` | Patroni HA. TimescaleDB for `query_log` at very high QPS. |
 
-### 10.6 Configuration Priority
+### 11.6 Configuration Priority
 
 ```
 CLI flags > Environment Variables > Config file (YAML) > Defaults
@@ -870,11 +1136,9 @@ CLI flags > Environment Variables > Config file (YAML) > Defaults
 
 ---
 
-## 11. Observability
+## 12. Observability
 
-### 11.1 Metrics (Prometheus)
-
-Each container exposes a `/metrics` endpoint.
+### 12.1 Metrics (Prometheus)
 
 **dnsdave-dns:**
 
@@ -884,10 +1148,19 @@ Each container exposes a `/metrics` endpoint.
 | `dnsdave_dns_query_duration_us` | Histogram | `response_type` |
 | `dnsdave_dns_blocked_total` | Counter | — |
 | `dnsdave_dns_cache_hits_total` | Counter | — |
-| `dnsdave_dns_cache_misses_total` | Counter | — |
 | `dnsdave_dns_bloom_false_positives_total` | Counter | — |
 | `dnsdave_dns_nats_publish_errors_total` | Counter | — |
-| `dnsdave_dns_nats_buffer_size` | Gauge | — |
+
+**dnsdave-dhcp:**
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `dnsdave_dhcp_leases_active` | Gauge | `scope_id` |
+| `dnsdave_dhcp_leases_total` | Counter | `scope_id`, `event_type` |
+| `dnsdave_dhcp_pool_utilisation` | Gauge | `scope_id` |
+| `dnsdave_dhcp_offer_latency_us` | Histogram | `scope_id` |
+| `dnsdave_dhcp_nak_total` | Counter | `scope_id`, `reason` |
+| `dnsdave_dhcp_dynamic_dns_registrations_total` | Counter | `scope_id` |
 
 **dnsdave-sync:**
 
@@ -897,95 +1170,109 @@ Each container exposes a `/metrics` endpoint.
 | `dnsdave_sync_duration_s` | Histogram | `list_id` |
 | `dnsdave_sync_errors_total` | Counter | `list_id` |
 
-**nats:**
+NATS: built-in monitoring endpoint on `:8222/metrics` via `nats-surveyor`.
 
-NATS exposes a Prometheus-compatible `/metrics` endpoint on port 8222 via the `nats-surveyor` sidecar or the built-in monitoring endpoint.
+### 12.2 Structured Logging
 
-### 11.2 Structured Logging
+All containers emit JSON logs. Correlate across containers using a `trace_id` embedded in NATS event payloads — present in both query log entries and DHCP lease events.
 
-All containers emit JSON logs. Level: `debug | info | warn | error`. Correlate across containers using a `trace_id` that is generated per DNS query and embedded in the NATS query event payload.
+### 12.3 Live Streams
 
-### 11.3 Live Query Stream
+| Stream | Endpoint | Source |
+|--------|----------|--------|
+| DNS query log | `GET /api/v1/logs/stream` (SSE) | `dnsdave.query.*` NATS |
+| DHCP lease events | `GET /api/v1/dhcp/leases/stream` (SSE) | `dnsdave.dhcp.lease.*` NATS |
 
-`GET /api/v1/logs/stream` (SSE) subscribes to `dnsdave.query.*` in NATS and streams decoded events. Zero Postgres reads. Sub-100ms latency from query to stream delivery.
-
-### 11.4 Health & Readiness
+### 12.4 Health & Readiness
 
 | Container | Endpoint | Ready when |
 |-----------|----------|-----------|
 | `dnsdave-dns` | `:9090/health`, `:9090/ready` | NATS connected, bloom filter loaded |
-| `dnsdave-api` | `:8080/api/v1/system/health`, `/ready` | NATS + Postgres connected |
+| `dnsdave-dhcp` | `:9093/health`, `:9093/ready` | NATS + Postgres connected, ≥1 scope configured |
+| `dnsdave-api` | `:8080/api/v1/system/health` | NATS + Postgres connected |
 | `dnsdave-sync` | `:9091/health` | NATS + Postgres connected |
 | `dnsdave-log` | `:9092/health` | NATS + Postgres connected |
 | `nats` | `:8222/healthz` | Built-in |
 
 ---
 
-## 12. Security
+## 13. Security
 
 | Concern | Mitigation |
 |---------|-----------|
 | Unauthenticated DNS | Standard; API always requires key/JWT |
+| Unauthenticated DHCP | Standard protocol; rogue server protection via NATS leader election (only one active DHCP server per broadcast domain) |
 | API key storage | Argon2id-hashed at rest; never logged |
 | DoT/DoH TLS | ACME auto-provisioned or BYO cert |
-| NATS auth | Username/password or NKey per container; deny-all default |
-| Rate limiting | Per-client DNS token bucket; API token bucket |
-| Log retention | `query_log` auto-partitioned and purged (default 30 days) |
-| Container isolation | `distroless/static` base; no shell, no package manager |
+| NATS auth | Per-container NKey credentials; deny-all default ACLs |
+| DHCP option injection | Options stored as typed values; raw hex only for explicitly declared custom codes |
+| Rate limiting | Per-client DNS token bucket; API token bucket; DHCP DISCOVER rate limit per MAC |
+| Log retention | `query_log` and `dhcp_leases` auto-purged (default 30 days / 90 days respectively) |
+| Container isolation | `distroless/static` base; no shell |
+| Secrets | `.env` or Kubernetes `Secret`; never baked into images |
 | CORS | Configurable allowed origins |
-| Secrets | `.env` file or Kubernetes `Secret`; never baked into images |
 
-NATS authentication uses per-container NKey credentials. `dnsdave-dns` has publish permission on `dnsdave.query.*` and subscribe permission on `dnsdave.config.>`, `dnsdave.blocklist.>`. It has no publish permission on config subjects — it cannot modify its own config.
+NATS per-container permissions:
+- `dnsdave-dns`: publish `dnsdave.query.*`; subscribe `dnsdave.config.>`, `dnsdave.blocklist.>`, `dnsdave.dhcp.lease.>`
+- `dnsdave-dhcp`: publish `dnsdave.dhcp.lease.*`; subscribe `dnsdave.config.>`; no publish on config subjects
+- `dnsdave-api`: publish `dnsdave.config.*`; no publish on query or lease subjects
 
 ---
 
-## 13. Milestones
+## 14. Milestones
 
 ### v0.1 — Core DNS + event bus foundations
 - [ ] `dnsdave-dns`: Rust, SO_REUSEPORT, UDP, forward-only resolver
 - [ ] `dnsdave-api`: REST API skeleton, Postgres, config CRUD
-- [ ] `nats`: JetStream + KV store configured
+- [ ] NATS JetStream + KV store configured
 - [ ] Config events published on every API write
 - [ ] `dnsdave-dns` consumes config events, rebuilds in-memory state
 - [ ] Basic blocklist ingest (hosts format) via sync worker
 - [ ] `docker-compose.yml` reference stack
 - [ ] Benchmark suite baseline
 
-### v0.2 — Blocklist ecosystem + event-driven distribution
+### v0.2 — Blocklist ecosystem
 - [ ] All list formats (adblock, domain-only, RPZ)
-- [ ] MPHF blocklist map (`boomphf`)
-- [ ] Bloom filter serialisation → NATS Object Store
-- [ ] `dnsdave-dns` hot-swap via Object Store fetch
+- [ ] MPHF blocklist map (`boomphf`) + Bloom filter hot-swap
+- [ ] Bloom filter → NATS Object Store; DNS hot-swap
 - [ ] `dnsdave-log`: NATS consumer → Postgres bulk writer
 - [ ] `dnsdave-stats`: in-memory counters from query events
-- [ ] Groups + per-group policy
+- [ ] Groups + per-group blocklist policy
 - [ ] Pi-hole API shim (v5)
 
 ### v0.3 — Advanced DNS
 - [ ] Wildcard records + copy-on-write label trie
-- [ ] CNAME chaining
-- [ ] PTR (reverse DNS)
-- [ ] Split-horizon views
+- [ ] CNAME chaining, PTR, split-horizon views
 - [ ] DoT + DoH upstream with HTTP/2 connection pooling
-- [ ] Negative caching (NXDOMAIN/NODATA)
-- [ ] Cache pre-warming from JetStream querylog replay
+- [ ] Negative caching; cache pre-warming from JetStream replay
 
 ### v0.4 — Production readiness
-- [ ] DoT listener (port 853) in `dnsdave-dns`
-- [ ] DoH listener in `dnsdave-api`
+- [ ] DoT listener (:853) + DoH listener (:8080/dns-query)
 - [ ] TLS auto-provisioning (ACME)
-- [ ] Prometheus metrics across all containers
+- [ ] Prometheus metrics across all containers (µs granularity)
 - [ ] SSE live log stream via NATS
 - [ ] Helm chart v1 (DaemonSet DNS, replicated API, NATS StatefulSet)
-- [ ] `recvmmsg`/`sendmmsg` batch I/O
-- [ ] NATS NKey per-container auth
+- [ ] `recvmmsg`/`sendmmsg` batch I/O + NATS NKey auth
 
-### v0.5 — Multi-node HA + scalability
-- [ ] `dnsdave-dns` horizontal scale (N nodes, all subscribe independently)
+### v0.5 — DHCP
+- [ ] `dnsdave-dhcp`: DHCPv4 DORA state machine, scope management, static reservations
+- [ ] Full DHCPv4 option suite (codes 1–252; raw hex for custom codes)
+- [ ] Client class matching + vendor-specific option delivery
+- [ ] PXE boot with automatic BIOS/UEFI architecture detection (option 93)
+- [ ] DHCP relay support (RFC 3046 giaddr + option 82)
+- [ ] Dynamic DNS: A + PTR auto-registration via NATS lease events
+- [ ] `dnsdave-dns` consumes `DNSDAVE_DHCP` JetStream for automatic record creation/removal
+- [ ] DHCP lease management API (`/api/v1/dhcp/*`)
+- [ ] SSE lease event stream (`/api/v1/dhcp/leases/stream`)
+- [ ] DHCPv6 SARR + IA_NA + IA_PD
+- [ ] Dual-stack: A + AAAA + PTR dynamic registration
+- [ ] DHCP Prometheus metrics + pool utilisation gauges
+
+### v0.6 — Multi-node HA + scalability
+- [ ] `dnsdave-dns` horizontal scale (N nodes, independent NATS subscribers)
 - [ ] NATS JetStream 3-node cluster
-- [ ] Leader election for `dnsdave-sync` and `dnsdave-stats` via NATS KV
-- [ ] Postgres Patroni HA integration
-- [ ] Active-active DNS with keepalived/VRRP (single site)
+- [ ] Leader election for `dnsdave-sync`, `dnsdave-stats`, `dnsdave-dhcp` via NATS KV
+- [ ] Postgres Patroni HA; active-active DNS with keepalived/VRRP
 - [ ] Pi-hole API shim (v6)
 
 ### v1.0 — Multi-region
@@ -995,69 +1282,68 @@ NATS authentication uses per-container NKey credentials. `dnsdave-dns` has publi
 
 ---
 
-## 14. Technology Choices
+## 15. Technology Choices
 
-### 14.1 Per-Container Stack
+### 15.1 Per-Container Stack
 
 | Container | Language | Key Libraries |
 |-----------|----------|--------------|
-| `dnsdave-dns` | **Rust** | `hickory-dns`, `tokio`, `socket2`, `nix` (recvmmsg), `async-nats`, `arc-swap`, `hashbrown`, `boomphf`, `bloomfilter`, `moka`, `memchr` |
-| `dnsdave-api` | **Rust** | `axum`, `tokio`, `async-nats`, `sqlx`, `utoipa` (OpenAPI) |
+| `dnsdave-dns` | **Rust** | `hickory-dns`, `tokio`, `socket2`, `nix`, `async-nats`, `arc-swap`, `hashbrown`, `boomphf`, `bloomfilter`, `moka`, `memchr` |
+| `dnsdave-dhcp` | **Rust** | `dhcproto`, `tokio`, `socket2`, `async-nats`, `sqlx`, `memchr` |
+| `dnsdave-api` | **Rust** | `axum`, `tokio`, `async-nats`, `sqlx`, `utoipa` |
 | `dnsdave-sync` | **Rust** | `tokio`, `async-nats`, `sqlx`, `reqwest`, `memchr`, `boomphf`, `bloomfilter` |
 | `dnsdave-log` | **Rust** | `async-nats`, `sqlx`, `tokio` |
 | `dnsdave-stats` | **Rust** | `async-nats`, `tokio`, `dashmap` |
 
-### 14.2 Infrastructure
+### 15.2 Infrastructure
 
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
-| Event bus | **NATS JetStream** | <100µs publish latency; 15MB image; built-in Object Store + KV; Rust `async-nats` client; JetStream clustering for HA |
-| DNS library | `hickory-dns` | Primary Rust DNS library; exposes wire format for zero-copy |
-| Async runtime | `tokio` | De facto standard; excellent UDP + HTTP/2 support |
-| UDP batch I/O | `nix` (`recvmmsg`/`sendmmsg`) | Batch syscalls on Linux; `socket2` for SO_REUSEPORT |
+| Event bus | **NATS JetStream** | <100µs publish; 15MB image; Object Store + KV built-in; `async-nats` Rust client |
+| DHCP library | `dhcproto` | Pure Rust; DHCPv4 + DHCPv6 encode/decode; no C dependencies |
+| DNS library | `hickory-dns` | Primary Rust DNS library; wire format access for zero-copy |
+| Async runtime | `tokio` | De facto standard; excellent UDP + HTTP/2 |
+| UDP batch I/O | `nix` (`recvmmsg`/`sendmmsg`) | Linux batch syscalls; `socket2` for SO_REUSEPORT |
 | Bloom filter | `bloomfilter` | Serialisable; configurable FPR |
-| Perfect hash | `boomphf` | Minimal perfect hash for immutable blocklist; ~3 bits/entry |
+| Perfect hash | `boomphf` | Minimal perfect hash; ~3 bits/entry for immutable blocklist |
 | Concurrent cache | `moka` | Window TinyLFU; better hit rate than LRU for DNS; internally sharded |
-| Lock-free swap | `arc-swap` | ArcSwap for atomic pointer swap without unsafe code |
-| Concurrent map | `dashmap` | For write-heavy concurrent maps (stats counters) |
+| Lock-free swap | `arc-swap` | ArcSwap for atomic pointer swap without unsafe |
+| Concurrent map | `dashmap` | Write-heavy concurrent maps (stats counters) |
 | Byte scanning | `memchr` | AVX2/NEON SIMD; fastest byte search available |
 | HTTP client | `reqwest` | Async; HTTP/2; transparent gzip/zstd |
 | Database | `sqlx` | Async; compile-time query checking; SQLite + PostgreSQL |
-| SQLite | `sqlx` with `libsqlite3` | Bundled; no separate install |
-| ORM | None — `sqlx` raw queries | No magic; full control |
 | Config | `config` crate + `clap` | Flag / env / file priority chain |
-| OpenAPI | `utoipa` + `aide` | Macro-based; generates spec from handler annotations |
-| Serialisation (events) | `rmp-serde` (MessagePack) | ~300 bytes per query event; no JSON parsing overhead |
-| Container base | `gcr.io/distroless/cc` | No shell; minimal attack surface; glibc for Rust linkage |
+| OpenAPI | `utoipa` + `aide` | Generates spec from handler annotations |
+| Serialisation (events) | `rmp-serde` (MessagePack) | ~300–420 bytes per event; no JSON parsing overhead |
+| Container base | `gcr.io/distroless/cc` | No shell; minimal attack surface |
 | CI | GitHub Actions | Multi-arch build (amd64 + arm64); push to GHCR |
 | Benchmarking | `criterion` + `dnsperf` + `flamethrower` | Microbenchmarks + QPS + flamegraph |
 
-### 14.3 Language Rationale
-
-Rust is chosen over Go for the following concrete reasons:
+### 15.3 Language Rationale
 
 | Factor | Rust | Go |
 |--------|------|----|
-| GC pauses | None | <1ms, but present; impacts p99/p999 |
-| Blocklist lookup | `hashbrown` SIMD probing + MPHF | Go map (no SIMD) |
+| GC pauses | None | <1ms, present; impacts p99/p999 |
+| Blocklist lookup | `hashbrown` SIMD + MPHF | Go map (no SIMD) |
 | Memory (5M blocklist) | ~300MB (MPHF) | ~600MB (map) |
-| Byte scanning | `memchr` AVX2/NEON | `bytes.IndexByte` (SIMD, but less tuned) |
-| Lock-free swap | `ArcSwap` (no unsafe) | `atomic.Pointer` (equivalent) |
-| Async I/O | `tokio` (equivalent) | goroutines (equivalent) |
-| DNS library maturity | `hickory-dns` (good) | `miekg/dns` (excellent) |
+| Byte scanning | `memchr` AVX2/NEON | `bytes.IndexByte` (SIMD, less tuned) |
+| Lock-free swap | `ArcSwap` | `atomic.Pointer` (equivalent) |
+| DNS library | `hickory-dns` (good) | `miekg/dns` (excellent) |
+| DHCP library | `dhcproto` (good) | Limited options |
 | Development velocity | Slower | Faster |
 
-All containers are Rust for consistency. If `hickory-dns` proves insufficient, the wire-format layer can be replaced with a custom implementation using the raw `tokio` UDP socket — nothing else changes.
+All containers are Rust for consistency. `dhcproto` covers DHCPv4 and DHCPv6 without CGo.
 
 ---
 
-## 15. Open Questions
+## 16. Open Questions
 
-1. **Web UI scope** — API-only for v1, or ship a minimal read-only Svelte dashboard that subscribes to the SSE stream?
-2. **DHCP integration** — Expose a webhook so Kea/dnsmasq can register leases by publishing `dnsdave.config.record.created` to NATS?
-3. **RPZ as output** — Serve RPZ zones to downstream resolvers by consuming `dnsdave.blocklist.*` and generating zone files?
-4. **DoH port** — Serve DoH on `:8080/dns-query` (shared with API) or dedicated `:443`?
-5. **Multi-tenancy** — First-class namespace/org concept for SaaS, or single-tenant-per-instance?
-6. **`dnsdave-stats` persistence** — Keep counters in-memory only (lost on restart) or checkpoint to NATS KV periodically?
-7. **NATS vs Redpanda at scale** — At what sustained QPS should we evaluate replacing NATS with Redpanda? Benchmark trigger: >500K queries/sec sustained for >1 hour.
-8. **Blocklist NATS Object Store limits** — NATS Object Store chunks objects into 128KB parts. For a 90MB bloom filter this is ~700 chunks. Benchmark the fetch + reassemble time at startup vs. fetching from Postgres directly.
+1. **Web UI scope** — API-only for v1, or ship a minimal read-only Svelte dashboard subscribing to SSE streams?
+2. **RPZ as output** — Serve RPZ zones to downstream resolvers by consuming `dnsdave.blocklist.*`?
+3. **DoH port** — Serve DoH on `:8080/dns-query` (shared with API) or dedicated `:443`?
+4. **Multi-tenancy** — First-class namespace/org concept for SaaS, or single-tenant-per-instance?
+5. **`dnsdave-stats` persistence** — In-memory only (lost on restart) or checkpoint to NATS KV periodically?
+6. **NATS vs Redpanda at scale** — Benchmark trigger: >500K QPS sustained for >1 hour.
+7. **Bloom filter fetch at startup** — 90MB bloom filter is ~700 NATS Object Store chunks. Benchmark fetch + reassemble time vs. direct Postgres read. If Postgres is faster, use it only for startup and NATS only for live updates.
+8. **DHCP HA across broadcast domains** — In a multi-site Kubernetes deployment, each node needs a DHCP server on its local broadcast domain. DaemonSet is the right primitive, but leader election must be per-node, not cluster-wide. Design the NATS KV lock key as `dhcp.leader.{node_name}`.
+9. **DHCPv6 prefix delegation (IA_PD)** — For ISP-style deployments where `dnsdave-dhcp` delegates IPv6 prefixes to customer routers. Scope for v0.5 or push to v1?

@@ -14,7 +14,7 @@ Every test in this document must pass before the corresponding milestone is cons
 ```
 {COMPONENT}-{TYPE}-{NNN}
 
-COMPONENT : DNS | BL | DHCP | DDNS | ZONE | API | BUS | PERF | SEC | COMPAT
+COMPONENT : DNS | BL | DHCP | DDNS | ZONE | FWD | DNSSEC | API | BUS | PERF | SEC | COMPAT
 TYPE      : U (unit) | I (integration) | L (load)
 NNN       : zero-padded sequence within component+type
 ```
@@ -984,7 +984,273 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 8. DHCP — Integration Tests
+## 8. Conditional Forwarding — Unit Tests
+
+### FWD-U-001 · Forward zone table — longest-suffix match
+
+| Field | Value |
+|-------|-------|
+| Input | Forward zones: `corp.example.com → 10.1.1.10`, `example.com → 10.2.2.20` |
+| Query | `host.corp.example.com` |
+| Expected | `ForwardZoneTable::find` returns `10.1.1.10` (longest match wins) |
+| Pass | Correct upstream selected; `example.com` entry not returned |
+
+---
+
+### FWD-U-002 · Forward zone table — catch-all (`.`)
+
+| Field | Value |
+|-------|-------|
+| Input | Forward zone `.` configured with upstream `1.1.1.1`; also `home.arpa` as owned zone |
+| Query A | `anything.com` (not owned, not in named forward zone) |
+| Query B | `server.home.arpa` (owned zone) |
+| Expected A | `ForwardZoneTable::find` returns catch-all entry `1.1.1.1` |
+| Expected B | Zone authority trie match takes precedence; `ForwardZoneTable::find` not reached for this name |
+| Pass | Catch-all correctly routes non-owned names; owned zone is not affected |
+
+---
+
+### FWD-U-003 · Forward zone bypasses blocklist
+
+| Field | Value |
+|-------|-------|
+| Input | Forward zone `corp.example.com → 10.1.1.10`; domain `ads.corp.example.com` in blocklist |
+| Expected | Hot path exits at step 7b (forward zone branch); blocklist check at step 8–9 is never reached |
+| Pass | Blocked domain resolves via forward zone (no NXDOMAIN from blocklist) |
+
+---
+
+## 9. Conditional Forwarding — Integration Tests
+
+### FWD-I-001 · Forward zone created and queries routed to correct upstream
+
+| Field | Value |
+|-------|-------|
+| Setup | Mock DNS server on `127.0.0.1:5300` returns `A 192.0.2.1` for `host.corp.example.com` |
+| Step 1 | POST forward zone `corp.example.com → 127.0.0.1:5300` |
+| Step 2 | Query `host.corp.example.com A` |
+| Expected | Answer `192.0.2.1`; AA=0; global upstream NOT queried |
+| Pass | Response correct within 1 second of zone creation |
+
+---
+
+### FWD-I-002 · Forward zone cache — second query does not hit upstream
+
+| Field | Value |
+|-------|-------|
+| Setup | Forward zone configured; mock upstream has a request counter |
+| Step 1 | Query `host.corp.example.com A` (upstream hit count = 1) |
+| Step 2 | Query again within TTL |
+| Expected | Upstream hit count still 1; answer returned from cache |
+| Pass | Answer cache serves forward zone responses on cache hit |
+
+---
+
+### FWD-I-003 · Forward zone deletion reverts to global upstream
+
+| Field | Value |
+|-------|-------|
+| Setup | Forward zone `corp.example.com → 127.0.0.1:5300`; global upstream returns NXDOMAIN for this name |
+| Step 1 | DELETE forward zone |
+| Step 2 | Query `host.corp.example.com A` |
+| Expected | Query reaches global upstream; NXDOMAIN returned |
+| Pass | Reversion propagates within 2 seconds |
+
+---
+
+### FWD-I-004 · Forward zone propagation to all DNS nodes
+
+| Field | Value |
+|-------|-------|
+| Setup | 2 `dnsdave-dns` nodes; mock upstream on `127.0.0.1:5300` |
+| Step 1 | POST forward zone via API |
+| Step 2 | Query both nodes for a name in the zone |
+| Expected | Both nodes forward to mock upstream and return the correct answer within 2 seconds |
+| Pass | `dnsdave.config.forwardzone.created` NATS event received by both nodes |
+
+---
+
+### FWD-I-005 · Consul forward zone — `.consul` routes to `127.0.0.1:8600`
+
+| Field | Value |
+|-------|-------|
+| Setup | Mock Consul DNS on `127.0.0.1:8600` returns `A 10.5.0.1` for `web.service.consul` |
+| Step 1 | POST forward zone `consul → 127.0.0.1:8600` |
+| Step 2 | Query `web.service.consul A` |
+| Expected | Answer `10.5.0.1`; query routed to port 8600 |
+| Pass | Single-label TLD forward zone works correctly |
+
+---
+
+## 10. DNSSEC — Unit Tests
+
+### DNSSEC-U-001 · RRSIG validation — valid signature accepted
+
+| Field | Value |
+|-------|-------|
+| Input | Crafted DNS response with valid RRSIG over A RRset; correct DNSKEY provided |
+| Expected | `hickory_dns` DNSSEC validator returns `ValidationResult::Secure`; AD bit set in reply |
+| Pass | Valid signature accepted; no SERVFAIL |
+
+---
+
+### DNSSEC-U-002 · RRSIG validation — tampered record rejected (strict mode)
+
+| Field | Value |
+|-------|-------|
+| Input | DNS response with valid RRSIG, but A record value altered after signing |
+| Config | `dnssec_validate: strict` |
+| Expected | Validator returns error; response to client is SERVFAIL |
+| Pass | Tampered response caught; SERVFAIL returned |
+
+---
+
+### DNSSEC-U-003 · RRSIG validation — failure logged but answered (opportunistic mode)
+
+| Field | Value |
+|-------|-------|
+| Input | DNS response with invalid RRSIG |
+| Config | `dnssec_validate: opportunistic` |
+| Expected | Validation failure logged; unsigned answer returned to client; AD bit NOT set |
+| Pass | Opportunistic mode does not SERVFAIL on signature failure |
+
+---
+
+### DNSSEC-U-004 · NSEC3 negative proof — NXDOMAIN validated
+
+| Field | Value |
+|-------|-------|
+| Input | Signed zone response with NXDOMAIN + NSEC3 proof for `missing.example.com` |
+| Expected | NSEC3 proof validated; negative caching honours NSEC3 minimum TTL |
+| Pass | Authenticated NXDOMAIN cached and returned correctly |
+
+---
+
+### DNSSEC-U-005 · DNSKEY wire encoding round-trip
+
+| Field | Value |
+|-------|-------|
+| Input | Ed25519 keypair generated; DNSKEY RDATA serialised |
+| Expected | Deserialized DNSKEY matches original public key bytes; key tag computed deterministically |
+| Pass | DNSKEY encode/decode is lossless |
+
+---
+
+### DNSSEC-U-006 · RRSIG generation for A record
+
+| Field | Value |
+|-------|-------|
+| Input | Zone `home.arpa`, ZSK (Ed25519), A record `server.home.arpa 300 A 10.0.0.1` |
+| Expected | `sign_rrset` produces RRSIG; validating with the ZSK public key returns success |
+| Pass | Generated RRSIG passes self-verification |
+
+---
+
+### DNSSEC-U-007 · NSEC3 chain — no zone enumeration
+
+| Field | Value |
+|-------|-------|
+| Input | Zone with 5 records; NSEC3 (0 iterations, empty salt) chain generated |
+| Expected | Each NSEC3 record covers a hash range; no two records have adjacent plaintext names derivable without brute-force |
+| Pass | NSEC3 chain is complete and does not expose plaintext names |
+
+---
+
+## 11. DNSSEC — Integration Tests
+
+### DNSSEC-I-001 · DO bit set on upstream queries when validation enabled
+
+| Field | Value |
+|-------|-------|
+| Setup | Capture upstream DNS traffic (mock resolver that logs requests) |
+| Config | `dnssec_validate: strict` globally |
+| Step 1 | Query `example.com A` |
+| Expected | Upstream query contains EDNS0 with DO bit = 1 |
+| Pass | DO bit confirmed set in captured upstream query |
+
+---
+
+### DNSSEC-I-002 · AD bit in client reply for validated response
+
+| Field | Value |
+|-------|-------|
+| Setup | Upstream mock returns fully signed, valid A record for `example.com` with RRSIG and DNSKEY |
+| Config | `dnssec_validate: strict` |
+| Step 1 | Query `example.com A` from client |
+| Expected | Response has AD=1; RCODE NOERROR |
+| Pass | Client receives Authentic Data indication |
+
+---
+
+### DNSSEC-I-003 · SERVFAIL on upstream signature failure (strict)
+
+| Field | Value |
+|-------|-------|
+| Setup | Upstream mock returns A record with deliberately invalid RRSIG |
+| Config | `dnssec_validate: strict` |
+| Step 1 | Query `badchain.example.com A` |
+| Expected | Client receives RCODE SERVFAIL; no answer in answer section |
+| Pass | Validation failure causes SERVFAIL, not a transparent pass-through |
+
+---
+
+### DNSSEC-I-004 · Zone signing — DNSKEY served for signed zone
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` created; `PATCH` to enable `dnssec_signed: true`; key generated |
+| Step 1 | Query `home.arpa DNSKEY` |
+| Expected | Response contains at least one DNSKEY record (KSK + ZSK); AA=1 |
+| Pass | DNSKEY records served from owned zone |
+
+---
+
+### DNSSEC-I-005 · Zone signing — RRSIG returned for A record
+
+| Field | Value |
+|-------|-------|
+| Setup | Signed zone `home.arpa`; A record `server.home.arpa 300 A 10.0.0.1` |
+| Step 1 | Query `server.home.arpa A` with DO bit set |
+| Expected | Answer contains both A record and RRSIG record; RRSIG validated against zone DNSKEY |
+| Pass | Signed response passes external DNSSEC validation tool (e.g. `delv` or `dig +dnssec`) |
+
+---
+
+### DNSSEC-I-006 · Zone signing — NSEC3 returned for NXDOMAIN
+
+| Field | Value |
+|-------|-------|
+| Setup | Signed zone `home.arpa` with NSEC3 enabled |
+| Step 1 | Query `missing.home.arpa A` with DO bit set |
+| Expected | RCODE NXDOMAIN; authority section contains SOA + NSEC3 denial proof; AA=1 |
+| Pass | NSEC3 proof present and validates with external tool |
+
+---
+
+### DNSSEC-I-007 · DS record export API
+
+| Field | Value |
+|-------|-------|
+| Setup | Signed zone `home.arpa` with KSK |
+| Step 1 | `GET /api/v1/dns/dnssec/zones/home.arpa/ds` |
+| Expected | Response contains DS record fields: key tag, algorithm, digest type, digest (SHA-256 and SHA-384) |
+| Pass | DS record matches KSK DNSKEY via independent computation |
+
+---
+
+### DNSSEC-I-008 · New record in signed zone — RRSIG auto-regenerated
+
+| Field | Value |
+|-------|-------|
+| Setup | Signed zone `home.arpa`; existing records already signed |
+| Step 1 | POST new A record `newhost.home.arpa → 10.0.0.50` |
+| Step 2 | Query `newhost.home.arpa A` with DO bit set |
+| Expected | Response includes valid RRSIG for new record; SOA serial incremented |
+| Pass | Inline signing complete within 2 seconds of API write |
+
+---
+
+## 12. DHCP — Integration Tests
 
 ### DHCP-I-001 · DORA — client receives IP from pool
 
@@ -1132,7 +1398,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 9. Dynamic DNS (DHCP→DNS) — Integration Tests
+## 13. Dynamic DNS (DHCP→DNS) — Integration Tests
 
 ### DDNS-I-001 · Lease assigned → A record created automatically
 
@@ -1228,7 +1494,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 10. API — Integration Tests
+## 14. API — Integration Tests
 
 ### API-I-001 · Authentication — missing API key returns 401
 
@@ -1394,7 +1660,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 11. Event Bus — Integration Tests
+## 15. Event Bus — Integration Tests
 
 ### BUS-I-001 · API write publishes NATS config event
 
@@ -1486,7 +1752,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 12. Performance / Load Tests
+## 16. Performance / Load Tests
 
 All load tests run on a **dedicated 4-core host** (not CI). Results are recorded in `benchmarks/` and gated in CI via stored baselines. A regression of >5% on any metric fails the build.
 
@@ -1614,7 +1880,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-## 13. Security Tests
+## 17. Security Tests
 
 ### SEC-001 · Unauthenticated API request — 401 on every endpoint
 
@@ -1690,7 +1956,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-## 14. Pi-hole Compatibility Tests
+## 18. Pi-hole Compatibility Tests
 
 ### COMPAT-001 · Summary endpoint returns Pi-hole v5 schema
 
@@ -1777,8 +2043,9 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 |-----------|----------------------|
 | v0.1 | DNS-U-001 through 016; BL-U-001 through 008; DNS-I-001 through 012; BL-I-001, 003, 006; BUS-I-001 through 003; API-I-001 through 007 |
 | v0.2 | All v0.1 gates + BL-I-001 through 006; BUS-I-004 through 006; COMPAT-001 through 006 |
-| v0.3 | All v0.2 gates + DNS-I-005 through 012; ZONE-U-001 through 008; ZONE-I-001 through 013 |
-| v0.4 | All v0.3 gates + PERF-L-001 through 006; SEC-001 through 007 |
+| v0.3 | All v0.2 gates + DNS-I-005 through 012; ZONE-U-001 through 008; ZONE-I-001 through 013; FWD-U-001 through 003; FWD-I-001 through 005 |
+| v0.4 | All v0.3 gates + DNSSEC-U-001 through 004; DNSSEC-I-001 through 003; PERF-L-001 through 006; SEC-001 through 007 |
+| v0.4.5 | All v0.4 gates + DNSSEC-U-005 through 007; DNSSEC-I-004 through 008 |
 | v0.5 (DHCP) | All v0.4 gates + DHCP-U-001 through 013; DHCP-I-001 through 013; DDNS-I-001 through 009; API-I-008 through 014; BUS-I-007, 008 |
 | v0.6 (HA) | All v0.5 gates + PERF-L-007 through 011; BUS-I-006 through 008 |
 

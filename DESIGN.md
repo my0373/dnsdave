@@ -38,11 +38,13 @@ DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **even
 | G9 | **Loose coupling via an event bus.** The DNS hot path offloads all side-effects asynchronously. New functionality is added by subscribing to the bus — zero changes to the DNS container. |
 | G10 | **First-class DHCPv4 and DHCPv6 server** with full RFC option support, static reservations, PXE boot, DHCP relay, and automatic DNS record registration on lease assignment. |
 | G11 | **Authoritative local DNS server** for any zone it owns. DNSDave answers authoritatively (AA flag set, SOA in authority section) for configured zones and never forwards those queries upstream. Supports zone transfers (AXFR/IXFR), NOTIFY to secondaries, and RFC 2136 dynamic updates. |
+| G12 | **Conditional DNS forwarding.** Named forward zones route queries for specific domains to designated upstream resolvers, bypassing the global upstream pool and the blocklist. Essential for VPN/corporate split-DNS, multi-site internal networks, and ISP-delegated zones. |
+| G13 | **DNSSEC support** at two levels: (a) *validation* — verify cryptographic signatures on responses from upstream resolvers and set the AD bit; (b) *signing* — sign owned zones with ZSK/KSK key pairs, serve DNSKEY/RRSIG/NSEC3 records, and expose DS records for delegation. |
 
 ### Non-Goals (v1)
 
 - Building a full recursive resolver (we forward upstream for non-local zones).
-- DNSSEC signing of local zones.
+- Automated DNSSEC key ceremony with HSM hardware (key operations are software-only via `ring`/`rcgen`).
 - A bundled web UI (the API is the product; a reference SPA can come later).
 
 ---
@@ -167,6 +169,17 @@ dnsdave.
 │   └── transfer.requested.{zone_name}  # AXFR/IXFR request logged (core, analytics)
 │                                    # Delivery: JetStream for serial.updated + record.*
 │
+├── config.
+│   └── forwardzone.{action}        # forward zone created | updated | deleted
+│                                    # Triggers ForwardZoneTable ArcSwap on all DNS nodes
+│                                    # Delivery: JetStream (at-least-once); replayed on startup
+│
+├── dnssec.
+│   ├── key.created.{zone_name}     # new ZSK or KSK generated
+│   ├── key.retired.{zone_name}     # key rollover — old key retired
+│   └── zone.signed.{zone_name}     # full zone re-sign complete; DNS nodes re-fetch DNSKEY+RRSIGs
+│                                    # Delivery: JetStream (at-least-once)
+│
 └── upstream.
     └── health.{upstream_id}         # healthy | degraded | down (core)
 ```
@@ -179,6 +192,7 @@ dnsdave.
 | `DNSDAVE_BLOCKLIST` | `dnsdave.blocklist.>` | Last per subject | Blocklist diff replay |
 | `DNSDAVE_DHCP` | `dnsdave.dhcp.lease.>` | 90 days | Lease history; replayed by DNS nodes for dynamic record state |
 | `DNSDAVE_ZONES` | `dnsdave.zone.>` | All messages | Zone / SOA state replay — new DNS nodes self-bootstrap zone authority and serial state |
+| `DNSDAVE_DNSSEC` | `dnsdave.dnssec.>` | All messages | DNSSEC key lifecycle events; zone re-sign notifications |
 | `DNSDAVE_QUERYLOG` | `dnsdave.query.>` | 24h rolling | Audit / log writer catch-up |
 
 ### 4.4 NATS Object Store (Bloom Filters)
@@ -277,24 +291,32 @@ flowchart TD
     C --> D{"3  Allowlist\nexact match?"}
     D -->|hit| R1(["Return NOERROR"])
     D -->|miss| E{"4  Local record\nexact match?"}
-    E -->|hit| R2(["Return answer · set AA=1 if name in owned zone"])
+    E -->|hit| R2(["Return answer · AA=1 if in owned zone"])
     E -->|miss| F{"5  Wildcard trie\nmatch?"}
-    F -->|hit| R3(["Return answer · set AA=1 if name in owned zone"])
-    F -->|miss| G{"6  Zone authority\ncheck — ArcSwap suffix trie"}
-    G -->|"in owned zone\nno record exists"| R6(["Encode NXDOMAIN + SOA in authority\nAA=1 · Publish QueryEvent → NATS\nNEVER forward upstream"])
-    G -->|"not in any owned zone"| H{"7  Bloom filter\nnegative?"}
+    F -->|hit| R3(["Return answer · AA=1 if in owned zone"])
+    F -->|miss| G{"6  Zone authority check\nArcSwap suffix trie"}
+    G -->|"in owned zone\nno record exists"| R6(["Encode NXDOMAIN + SOA\nAA=1 · Publish QueryEvent → NATS\nNEVER forward upstream"])
+    G -->|"not in any owned zone"| FZ{"7  Forward zone check\nArcSwap table"}
+    FZ -->|"in forward zone"| FZC{"7a  Answer cache\nhit?"}
+    FZC -->|hit| R7a(["Return cached answer\nPublish QueryEvent → NATS"])
+    FZC -->|miss| FZU["7b  Forward to zone-specific\nupstream(s) — bypass blocklist\nDNSSEC validate if enabled"]
+    FZU --> R7b(["Cache answer · Return\nPublish QueryEvent → NATS"])
+    FZ -->|"not in any forward zone"| H{"8  Bloom filter\nnegative?"}
     H -->|"negative\nguaranteed not blocked"| J
-    H -->|positive| I{"8  Blocklist HashMap\nconfirmed blocked?"}
+    H -->|positive| I{"9  Blocklist HashMap\nconfirmed blocked?"}
     I -->|blocked| R4(["Encode NXDOMAIN\nPublish QueryEvent → NATS\nReturn buffer"])
-    I -->|false positive| J{"9  Answer cache\nhit?"}
+    I -->|false positive| J{"10  Answer cache\nhit?"}
     J -->|hit| R5(["Encode cached answer\nPublish QueryEvent → NATS\nReturn buffer"])
-    J -->|miss| K["10  Forward upstream\ntokio · HTTP/2 DoH pool"]
+    J -->|miss| K["11  Forward global upstream\ntokio · HTTP/2 DoH pool\nDNSSEC validate if enabled · set DO bit"]
     K --> L(["Cache answer · Encode response\nPublish QueryEvent → NATS\nReturn buffer"])
 ```
 
-The NATS publish in steps 6, 8, 9, and 10 is a **non-blocking write to the async-nats client buffer** — no syscall, no network boundary on the hot path.
+All NATS publishes are **non-blocking writes to the async-nats client buffer** — no syscall, no network boundary on the hot path.
 
-**Critical semantic for step 6:** DNSDave never forwards queries for zones it owns to an upstream resolver. If a name is within an owned zone and has no record, the response is authoritative NXDOMAIN (AA=1, SOA in authority section). This prevents information leakage and ensures local resolution is always definitive.
+**Critical semantics:**
+- **Step 6** — Owned zones never leak to upstream. Missing records return authoritative NXDOMAIN (AA=1, SOA in authority section).
+- **Step 7** — Forward zones bypass the blocklist entirely. If a name falls in a configured forward zone, it goes to that zone's designated resolver(s), not the global pool. The answer cache is still consulted first (step 7a) to avoid redundant upstream calls.
+- **Step 11** — When DNSSEC validation is enabled, the DO (DNSSEC OK) bit is set on upstream queries. Validated responses have the AD (Authentic Data) bit set in the reply; signature failures return SERVFAIL.
 
 ### 5.2 UDP I/O — Multi-Socket with SO_REUSEPORT
 
@@ -324,6 +346,7 @@ All hot-path lookups use `ArcSwap` — readers load an Arc with a single atomic 
 | Local records map | `ArcSwap<HashMap<DomainKey, Vec<Record>>>` | Swap on config or DHCP lease event |
 | Wildcard trie | `ArcSwap<LabelTrie>` | Swap on config event |
 | Zone authority trie | `ArcSwap<ZoneTrie>` | Swap on `dnsdave.zone.*` config event — holds SOA per zone |
+| Forward zone table | `ArcSwap<ForwardZoneTable>` | Swap on `dnsdave.config.forwardzone.*` event — suffix-matched; holds upstream list + DNSSEC policy per zone |
 
 ### 5.5 Blocklist In-Memory Layout
 
@@ -463,6 +486,76 @@ Updates are validated against `allow_update` CIDRs, translated to the same recor
 #### mDNS Unicast Bridge *(future)*
 
 A planned optional module bridges mDNS/Bonjour announcements (multicast `224.0.0.251:5353`) into a configured zone as unicast-accessible A/AAAA/PTR records. Devices that announce via mDNS (Apple TV, printers, smart speakers) become reachable as `device.home.arpa` from standard DNS clients.
+
+### 6.6 Conditional DNS Forwarding
+
+A **forward zone** routes queries for a specific domain suffix to a designated set of upstream resolvers, bypassing both the global upstream pool and the blocklist. This is distinct from an owned zone (where DNSDave is authoritative) — in a forward zone, DNSDave acts as a proxy to the named servers and caches their responses.
+
+```jsonc
+// POST /api/v1/dns/forwardzones
+{
+  "name":    "corp.example.com",
+  "upstreams": [
+    { "address": "10.1.1.10:53", "protocol": "udp" },
+    { "address": "10.1.1.11:53", "protocol": "udp" }
+  ],
+  "dnssec_validate": true,    // validate DNSSEC signatures from these resolvers
+  "enabled": true,
+  "comment": "Corporate internal DNS via VPN"
+}
+```
+
+Typical forward zone use cases:
+
+| Zone | Upstream | Purpose |
+|------|----------|---------|
+| `corp.example.com` | `10.1.1.10` | Corporate internal names via VPN |
+| `168.192.in-addr.arpa` | `10.1.1.10` | Reverse DNS for corporate subnet |
+| `consul` | `127.0.0.1:8600` | Consul service discovery |
+| `.` (catch-all) | Custom upstream pool | Override the global upstream for all non-local queries |
+
+**Hot path behavior (step 7):** Forward zone lookup uses a right-to-left label trie (same structure as the zone authority trie, stored in `ArcSwap<ForwardZoneTable>`). Longest suffix wins. The answer cache is checked first (step 7a) before the network call (step 7b). Forward zone responses are cached with normal TTL.
+
+**Blocklist bypass:** Queries routed through a forward zone skip the Bloom filter and Blocklist HashMap. If per-forward-zone blocklisting is required, it must be enforced by the target resolver.
+
+### 6.7 DNSSEC
+
+DNSDave provides DNSSEC at two levels, independently configurable:
+
+#### 6.7.1 DNSSEC Validation (Resolver Mode)
+
+When acting as a forwarder, DNSDave can validate DNSSEC signatures on responses from upstream resolvers.
+
+| Setting | Behaviour |
+|---------|-----------|
+| `validate: strict` | Set DO bit on all upstream queries; return SERVFAIL if any signature fails |
+| `validate: opportunistic` | Set DO bit; log failures but return the unsigned answer |
+| `validate: disabled` | Do not set DO bit; pass responses through unchanged |
+
+- Configurable globally via `DNSDAVE_DNSSEC_VALIDATE` env / API, and overridden per forward zone or per upstream.
+- Trust anchors are loaded from the IANA root KSK (auto-updated via NATS KV) plus any custom anchors configured for internal CAs.
+- Validated responses have the **AD (Authentic Data)** bit set in replies to clients.
+- DNSSEC negative responses (NSEC/NSEC3 records) are validated and cached.
+
+#### 6.7.2 DNSSEC Signing (Authoritative Mode)
+
+Owned zones can be signed with ZSK/KSK key pairs. When `dnssec_signed: true` is set on a zone:
+
+- **Key generation:** `POST /api/v1/dns/dnssec/keys` generates a ZSK (Ed25519, short-lived, 90-day default) and KSK (ECDSA P-384, long-lived, 1-year default). Private keys are stored encrypted in Postgres using the system's `DNSDAVE_SECRET_KEY`.
+- **Inline signing:** Every record write within a signed zone triggers RRSIG regeneration for the affected RRset, published to `dnsdave.zone.serial.updated` so all DNS nodes swap their in-memory copy.
+- **NSEC3:** Authenticated denial of existence uses NSEC3 (RFC 5155) with a random salt, preventing zone enumeration.
+- **DNSKEY & DS records:** The DNSKEY RR is served automatically. The DS record (for pasting into the parent zone's delegation) is exposed at `GET /api/v1/dns/dnssec/zones/:name/ds`.
+- **Key rollover:** ZSK rollover uses the pre-publish method (new ZSK published, old ZSK signing, then swap). Automated rollover schedule is configurable; NATS KV holds key lifecycle state.
+
+```jsonc
+// PATCH /api/v1/dns/zones/home.arpa  (enable signing on an existing zone)
+{
+  "dnssec_signed":    true,
+  "dnssec_algorithm": "ed25519",   // "ed25519" | "ecdsa-p256" | "ecdsa-p384"
+  "nsec3_iterations": 0,           // RFC 9276 recommends 0 iterations
+  "nsec3_salt":       ""           // empty salt recommended per RFC 9276
+}
+```
 
 ---
 
@@ -758,7 +851,21 @@ struct LeaseEvent {
 │   │   └── DELETE /:id
 │   ├── wildcards/
 │   ├── upstreams/
-│   └── views/
+│   ├── views/
+│   ├── forwardzones/
+│   │   ├── GET    /                  # list all forward zones
+│   │   ├── POST   /                  # create forward zone
+│   │   ├── GET    /:name
+│   │   ├── PUT    /:name
+│   │   └── DELETE /:name
+│   └── dnssec/
+│       ├── keys/
+│       │   ├── GET    /              # list all DNSSEC keys (all zones)
+│       │   ├── POST   /              # generate ZSK or KSK for a zone
+│       │   ├── GET    /:id
+│       │   └── DELETE /:id           # retire / revoke key
+│       └── zones/
+│           └── GET    /:name/ds      # export DS record for parent zone delegation
 ├── lists/
 │   ├── GET    /
 │   ├── POST   /
@@ -847,6 +954,11 @@ CREATE TABLE dns_zones (
     allow_transfer  JSONB NOT NULL DEFAULT '[]',  -- list of CIDRs
     allow_update    JSONB NOT NULL DEFAULT '[]',  -- CIDRs for RFC 2136 UPDATE
     notify          JSONB NOT NULL DEFAULT '[]',  -- list of secondary IPs to NOTIFY
+    -- DNSSEC signing config (requires dns_dnssec_keys rows)
+    dnssec_signed       BOOLEAN DEFAULT FALSE,
+    dnssec_algorithm    TEXT,                     -- 'ed25519' | 'ecdsa-p256' | 'ecdsa-p384'
+    nsec3_iterations    INTEGER DEFAULT 0,        -- RFC 9276: 0 recommended
+    nsec3_salt          TEXT DEFAULT '',          -- RFC 9276: empty salt recommended
     enabled     BOOLEAN DEFAULT TRUE,
     comment     TEXT,
     created_at  TIMESTAMP DEFAULT NOW(),
@@ -889,6 +1001,33 @@ CREATE TABLE dns_zone_changes (
     changed_at  TIMESTAMP DEFAULT NOW()
 );
 CREATE INDEX idx_zone_changes_zone_serial ON dns_zone_changes(zone_name, serial);
+
+-- Forward zones: queries for these suffixes bypass the blocklist and go to specific upstreams.
+-- "upstreams" is a JSONB array of {address, protocol} objects.
+CREATE TABLE dns_forward_zones (
+    name             TEXT PRIMARY KEY,    -- zone suffix, e.g. "corp.example.com" or "." (catch-all)
+    upstreams        JSONB NOT NULL,       -- [{address:"10.1.1.10:53", protocol:"udp"}, ...]
+    dnssec_validate  TEXT NOT NULL DEFAULT 'disabled',  -- 'strict' | 'opportunistic' | 'disabled'
+    enabled          BOOLEAN DEFAULT TRUE,
+    comment          TEXT,
+    created_at       TIMESTAMP DEFAULT NOW(),
+    updated_at       TIMESTAMP DEFAULT NOW()
+);
+
+-- DNSSEC key store. Private keys are AES-256-GCM encrypted with DNSDAVE_SECRET_KEY.
+CREATE TABLE dns_dnssec_keys (
+    id               TEXT PRIMARY KEY,
+    zone_name        TEXT NOT NULL REFERENCES dns_zones(name) ON DELETE CASCADE,
+    key_type         TEXT NOT NULL,       -- 'ksk' | 'zsk'
+    algorithm        TEXT NOT NULL,       -- 'ed25519' | 'ecdsa-p256' | 'ecdsa-p384'
+    key_tag          INTEGER NOT NULL,    -- DNS key tag (RFC 4034 §B)
+    public_key_b64   TEXT NOT NULL,       -- Base64 public key (DNSKEY RDATA)
+    private_key_enc  TEXT NOT NULL,       -- AES-GCM encrypted private key
+    is_active        BOOLEAN DEFAULT TRUE,
+    created_at       TIMESTAMP DEFAULT NOW(),
+    retire_at        TIMESTAMP,           -- NULL = no planned retirement
+    retired_at       TIMESTAMP           -- NULL = still in use
+);
 
 CREATE TABLE lists (
     id              TEXT PRIMARY KEY,
@@ -1370,7 +1509,7 @@ NATS per-container permissions:
 - [ ] Groups + per-group blocklist policy
 - [ ] Pi-hole API shim (v5)
 
-### v0.3 — Advanced DNS + Local Zone Authority
+### v0.3 — Advanced DNS + Local Zone Authority + Forwarding
 - [ ] Wildcard records + copy-on-write label trie
 - [ ] CNAME chaining, PTR, split-horizon views
 - [ ] DoT + DoH upstream with HTTP/2 connection pooling
@@ -1384,14 +1523,31 @@ NATS per-container permissions:
 - [ ] RFC 2136 DNS UPDATE ingest (ACME, ExternalDNS, Kea DDNS)
 - [ ] SOA serial auto-increment on every record write within a zone
 - [ ] Built-in zones: `home.arpa` template, reverse zone wizards
+- [ ] Conditional DNS forwarding (`dns_forward_zones` table; `ForwardZoneTable` ArcSwap)
+- [ ] Forward zone hot path step (step 7): cache-first, zone-specific upstream, blocklist bypass
+- [ ] `/api/v1/dns/forwardzones/` CRUD; `dnsdave.config.forwardzone.*` NATS events
+- [ ] Per-forward-zone DNSSEC validation policy (strict / opportunistic / disabled)
 
-### v0.4 — Production readiness
+### v0.4 — Production readiness + DNSSEC validation
 - [ ] DoT listener (:853) + DoH listener (:8080/dns-query)
 - [ ] TLS auto-provisioning (ACME)
 - [ ] Prometheus metrics across all containers (µs granularity)
 - [ ] SSE live log stream via NATS
 - [ ] Helm chart v1 (DaemonSet DNS, replicated API, NATS StatefulSet)
 - [ ] `recvmmsg`/`sendmmsg` batch I/O + NATS NKey auth
+- [ ] DNSSEC validation: DO bit on upstream queries; AD bit on validated replies; SERVFAIL on failure
+- [ ] Trust anchor management (root KSK IANA, custom anchors for internal CAs)
+- [ ] DNSSEC-aware negative caching (NSEC/NSEC3 validation)
+- [ ] Global `dnssec_validate` setting + per-upstream override
+
+### v0.4.5 — DNSSEC signing
+- [ ] ZSK + KSK generation (Ed25519 / ECDSA P-384) via `ring` crate
+- [ ] Private key encrypted storage in Postgres (`DNSDAVE_SECRET_KEY`)
+- [ ] Inline zone signing: RRSIG regeneration on every record write
+- [ ] NSEC3 records with 0 iterations, empty salt (RFC 9276)
+- [ ] `GET /api/v1/dns/dnssec/zones/:name/ds` — DS record export
+- [ ] ZSK pre-publish rollover (automated via NATS KV key lifecycle)
+- [ ] `dnsdave.dnssec.*` NATS events; `DNSDAVE_DNSSEC` JetStream stream
 
 ### v0.5 — DHCP
 - [ ] `dnsdave-dhcp`: DHCPv4 DORA state machine, scope management, static reservations
@@ -1427,7 +1583,7 @@ NATS per-container permissions:
 
 | Container | Language | Key Libraries |
 |-----------|----------|--------------|
-| `dnsdave-dns` | **Rust** | `hickory-dns`, `tokio`, `socket2`, `nix`, `async-nats`, `arc-swap`, `hashbrown`, `boomphf`, `bloomfilter`, `moka`, `memchr` |
+| `dnsdave-dns` | **Rust** | `hickory-dns`, `tokio`, `socket2`, `nix`, `async-nats`, `arc-swap`, `hashbrown`, `boomphf`, `bloomfilter`, `moka`, `memchr`, `ring` (DNSSEC validation) |
 | `dnsdave-dhcp` | **Rust** | `dhcproto`, `tokio`, `socket2`, `async-nats`, `sqlx`, `memchr` |
 | `dnsdave-api` | **Rust** | `axum`, `tokio`, `async-nats`, `sqlx`, `utoipa` |
 | `dnsdave-sync` | **Rust** | `tokio`, `async-nats`, `sqlx`, `reqwest`, `memchr`, `boomphf`, `bloomfilter` |
@@ -1440,7 +1596,8 @@ NATS per-container permissions:
 |---------|--------|-----------|
 | Event bus | **NATS JetStream** | <100µs publish; 15MB image; Object Store + KV built-in; `async-nats` Rust client |
 | DHCP library | `dhcproto` | Pure Rust; DHCPv4 + DHCPv6 encode/decode; no C dependencies |
-| DNS library | `hickory-dns` | Primary Rust DNS library; wire format access for zero-copy |
+| DNS library | `hickory-dns` | Primary Rust DNS library; wire format access for zero-copy; built-in DNSSEC validation and signing support |
+| DNSSEC crypto | `ring` + `rcgen` | ECDSA P-384, Ed25519 key generation and signing; no C deps on modern targets |
 | Async runtime | `tokio` | De facto standard; excellent UDP + HTTP/2 |
 | UDP batch I/O | `nix` (`recvmmsg`/`sendmmsg`) | Linux batch syscalls; `socket2` for SO_REUSEPORT |
 | Bloom filter | `bloomfilter` | Serialisable; configurable FPR |
@@ -1489,3 +1646,7 @@ All containers are Rust for consistency. `dhcproto` covers DHCPv4 and DHCPv6 wit
 10. **RFC 2136 TSIG auth** — DNS UPDATE packets can be authenticated with TSIG (HMAC-MD5 / HMAC-SHA256). Should this be required for RFC 2136 updates, or is IP-CIDR (`allow_update`) sufficient for v0.3?
 11. **mDNS unicast bridge** — Is the mDNS→unicast bridge in scope for v0.6, or only if there is user demand? Requires binding a multicast socket which may conflict with host mDNS daemons (avahi, mDNSResponder).
 12. **Secondary zone bootstrapping** — For `zone_type = secondary`, DNSDave must initiate an initial AXFR from the primary on zone creation. Which TCP connection pool handles this (reuse `dnsdave-dns` or a dedicated worker)?
+13. **Forward zone blocklisting** — Should forward zones optionally apply the local blocklist before forwarding (for filtering ads even on corporate DNS)? Or keep the bypass unconditional for simplicity?
+14. **DNSSEC validation and Pi-hole compatibility** — Pi-hole extensions and mobile apps send DNS queries directly; they don't set the DO bit. With strict DNSSEC validation enabled, should dnsdave-dns only validate its own upstream queries, or also re-validate queries that clients request validation for (CD bit)?
+15. **DNSSEC key rollover automation** — ZSK rollover requires coordinated publish→activate→retire phases over days. Should this be managed by a cron-style job within `dnsdave-api`, or a dedicated `dnsdave-keymgr` sidecar subscribed to NATS?
+16. **Trust anchor automatic updates** — The IANA root KSK rolls every ~5 years (next: ~2026). Should DNSDave fetch the current root trust anchor from IANA's XML feed automatically, or require manual operator action?

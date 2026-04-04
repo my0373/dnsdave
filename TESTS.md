@@ -14,7 +14,7 @@ Every test in this document must pass before the corresponding milestone is cons
 ```
 {COMPONENT}-{TYPE}-{NNN}
 
-COMPONENT : DNS | BL | DHCP | DDNS | API | BUS | PERF | SEC | COMPAT
+COMPONENT : DNS | BL | DHCP | DDNS | ZONE | API | BUS | PERF | SEC | COMPAT
 TYPE      : U (unit) | I (integration) | L (load)
 NNN       : zero-padded sequence within component+type
 ```
@@ -750,7 +750,241 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 6. DHCP — Integration Tests
+## 6. Local Zone Authority — Unit Tests
+
+### ZONE-U-001 · Zone authority trie — exact zone match
+
+| Field | Value |
+|-------|-------|
+| Input | Zone `home.arpa` configured; query name `server.home.arpa` |
+| Expected | `ZoneTrie::find("server.home.arpa")` returns `Some(&ZoneEntry{name: "home.arpa", ...})` |
+| Pass | Trie correctly identifies name as within the zone |
+
+---
+
+### ZONE-U-002 · Zone authority trie — non-member query
+
+| Field | Value |
+|-------|-------|
+| Input | Only `home.arpa` zone configured; query name `example.com` |
+| Expected | `ZoneTrie::find("example.com")` returns `None` |
+| Pass | Trie correctly identifies name is NOT in any owned zone |
+
+---
+
+### ZONE-U-003 · Zone authority trie — subdomain of non-owned apex
+
+| Field | Value |
+|-------|-------|
+| Input | Zone `home.arpa` configured; query `sub.notmine.arpa` |
+| Expected | `ZoneTrie::find` returns `None` |
+| Pass | No false positive match on shared TLD suffix |
+
+---
+
+### ZONE-U-004 · SOA wire encoding
+
+| Field | Value |
+|-------|-------|
+| Input | SOA record: mname `ns1.home.arpa`, serial `2026040101`, refresh `3600`, retry `900`, expire `604800`, minimum `60` |
+| Expected | Encoded wire bytes parse back via `hickory-dns` SOA parser to identical field values |
+| Pass | Round-trip encode/decode is lossless |
+
+---
+
+### ZONE-U-005 · SOA serial auto-increment — format and wrap
+
+| Field | Value |
+|-------|-------|
+| Input A | Serial `2026040101`; increment today (2026-04-01) |
+| Input B | Serial `2026040199`; increment (should overflow nn counter, bump date or increment by 1 per RFC 1982) |
+| Expected A | Serial becomes `2026040102` |
+| Expected B | Serial becomes `2026040200` (or `2026040201` if date bumped) |
+| Pass | Serial always increases monotonically per RFC 1982 |
+
+---
+
+### ZONE-U-006 · NXDOMAIN response includes SOA in authority section
+
+| Field | Value |
+|-------|-------|
+| Input | Zone `home.arpa` configured with SOA; query for `missing.home.arpa` (no record exists) |
+| Expected | Response: RCODE `NXDOMAIN`, AA bit set, authority section contains one SOA record matching zone SOA |
+| Pass | Response is RFC-2308-compliant negative response |
+
+---
+
+### ZONE-U-007 · AA flag set for records in owned zone
+
+| Field | Value |
+|-------|-------|
+| Input | Zone `home.arpa` owns `server.home.arpa A 10.0.0.1`; query for `server.home.arpa A` |
+| Expected | Response: RCODE `NOERROR`, AA bit = 1, answer = `10.0.0.1` |
+| Pass | AA flag is set on authoritative positive answers |
+
+---
+
+### ZONE-U-008 · AA flag NOT set for forwarded/cached answers
+
+| Field | Value |
+|-------|-------|
+| Input | Query for `google.com A` (not in any owned zone); upstream returns answer |
+| Expected | Response: RCODE `NOERROR`, AA bit = 0 |
+| Pass | Non-authoritative forwarded answers have AA=0 |
+
+---
+
+## 7. Local Zone Authority — Integration Tests
+
+### ZONE-I-001 · Create zone and resolve authoritative NXDOMAIN
+
+| Field | Value |
+|-------|-------|
+| Setup | DNSDave running; no zones configured |
+| Step 1 | POST `/api/v1/dns/zones` to create zone `home.arpa` |
+| Step 2 | Query DNS for `missing.home.arpa A` |
+| Expected | NXDOMAIN, AA=1, SOA in authority section; upstream is NOT queried |
+| Pass | Authoritative NXDOMAIN returned within 1 second of zone creation |
+
+---
+
+### ZONE-I-002 · Zone creation publishes NATS event and all nodes pick it up
+
+| Field | Value |
+|-------|-------|
+| Setup | 2 `dnsdave-dns` nodes running |
+| Step 1 | POST zone `home.arpa` via API |
+| Step 2 | Subscribe to `DNSDAVE_ZONES` JetStream; confirm `zone.serial.updated.home.arpa` published |
+| Step 3 | Query both DNS nodes for `missing.home.arpa` |
+| Expected | Both nodes return NXDOMAIN with AA=1 within 2 seconds |
+| Pass | Zone state propagated to all nodes via NATS |
+
+---
+
+### ZONE-I-003 · Record added to zone resolves with AA=1
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` configured |
+| Step 1 | POST A record `server.home.arpa → 10.0.0.1` via API |
+| Step 2 | Query `server.home.arpa A` |
+| Expected | Answer `10.0.0.1`, AA=1, RCODE NOERROR |
+| Pass | Record resolves authoritatively within 2 seconds |
+
+---
+
+### ZONE-I-004 · SOA serial increments on record write
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with SOA serial `S0` |
+| Step 1 | POST new A record in zone via API |
+| Step 2 | Query `home.arpa SOA` |
+| Expected | SOA serial in response > `S0` |
+| Pass | Serial incremented after any write within the zone |
+
+---
+
+### ZONE-I-005 · AXFR returns all zone records
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with `allow_transfer: ["127.0.0.1/32"]`; 5 A records created |
+| Step 1 | Send AXFR request over TCP from `127.0.0.1` |
+| Expected | Transfer begins with SOA, contains all 5 records, ends with SOA. Record count and values match database. |
+| Pass | AXFR transfer complete and correct; connection closes cleanly |
+
+---
+
+### ZONE-I-006 · AXFR rejected from unauthorised IP
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with `allow_transfer: ["192.168.1.0/24"]` |
+| Step 1 | Send AXFR request from `10.0.0.1` (outside allow_transfer) |
+| Expected | RCODE `REFUSED` |
+| Pass | Transfer refused; no zone data leaked |
+
+---
+
+### ZONE-I-007 · IXFR returns only changed records since given serial
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with serial `S0`; add 3 records (serial becomes `S1`); add 2 more (serial `S2`) |
+| Step 1 | Send IXFR request with `SOA serial = S1` |
+| Expected | Transfer contains only the 2 records added after `S1`; bounded by SOA `S1` and SOA `S2` |
+| Pass | IXFR content exactly matches the records changed after the given serial |
+
+---
+
+### ZONE-I-008 · NOTIFY sent to configured secondary on serial change
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with `notify: ["127.0.0.1"]`; stand up a mock DNS NOTIFY listener on localhost |
+| Step 1 | POST record to zone (triggers serial increment) |
+| Expected | Mock listener receives NOTIFY packet for `home.arpa` within 2 seconds; NOTIFY OPCODE = 4; zone name = `home.arpa` |
+| Pass | NOTIFY packet received and parseable |
+
+---
+
+### ZONE-I-009 · RFC 2136 DNS UPDATE — add record
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with `allow_update: ["127.0.0.1/32"]` |
+| Step 1 | Send DNS UPDATE packet (RFC 2136) from `127.0.0.1`: add `dynamic.home.arpa A 10.1.2.3 TTL=60` |
+| Expected | UPDATE RCODE `NOERROR`; subsequent A query for `dynamic.home.arpa` returns `10.1.2.3` with AA=1 |
+| Pass | RFC 2136 dynamic update accepted and resolves within 1 second |
+
+---
+
+### ZONE-I-010 · RFC 2136 DNS UPDATE — delete record
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with `allow_update: ["127.0.0.1/32"]`; record `dynamic.home.arpa A 10.1.2.3` exists |
+| Step 1 | Send DNS UPDATE: delete `dynamic.home.arpa A` |
+| Expected | UPDATE RCODE `NOERROR`; subsequent query returns NXDOMAIN with AA=1 |
+| Pass | RFC 2136 DELETE removes record and returns authoritative NXDOMAIN |
+
+---
+
+### ZONE-I-011 · RFC 2136 DNS UPDATE — rejected from unauthorised IP
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with `allow_update: ["192.168.1.0/24"]` |
+| Step 1 | Send DNS UPDATE from `10.0.0.1` (outside allow_update) |
+| Expected | RCODE `REFUSED`; no change to zone data |
+| Pass | Unauthorised UPDATE refused |
+
+---
+
+### ZONE-I-012 · Zone deletion removes zone from authority trie
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` configured with records |
+| Step 1 | DELETE `/api/v1/dns/zones/home.arpa` |
+| Step 2 | Query `missing.home.arpa` |
+| Expected | Query forwarded upstream (no longer authoritative); no AA flag |
+| Pass | Zone removal propagates within 2 seconds; queries forwarded |
+
+---
+
+### ZONE-I-013 · `home.arpa` reverse zone — PTR resolves from DHCP lease
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `168.192.in-addr.arpa` configured; DHCP assigns `192.168.1.50` to hostname `mylaptop` |
+| Expected | PTR query `50.1.168.192.in-addr.arpa` returns `mylaptop.home.arpa.` with AA=1 |
+| Pass | Reverse zone authoritatively serves PTR records created by DHCP DDNS |
+
+---
+
+## 8. DHCP — Integration Tests
 
 ### DHCP-I-001 · DORA — client receives IP from pool
 
@@ -898,7 +1132,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 7. Dynamic DNS (DHCP→DNS) — Integration Tests
+## 9. Dynamic DNS (DHCP→DNS) — Integration Tests
 
 ### DDNS-I-001 · Lease assigned → A record created automatically
 
@@ -994,7 +1228,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 8. API — Integration Tests
+## 10. API — Integration Tests
 
 ### API-I-001 · Authentication — missing API key returns 401
 
@@ -1160,7 +1394,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 9. Event Bus — Integration Tests
+## 11. Event Bus — Integration Tests
 
 ### BUS-I-001 · API write publishes NATS config event
 
@@ -1252,7 +1486,7 @@ NNN       : zero-padded sequence within component+type
 
 ---
 
-## 10. Performance / Load Tests
+## 12. Performance / Load Tests
 
 All load tests run on a **dedicated 4-core host** (not CI). Results are recorded in `benchmarks/` and gated in CI via stored baselines. A regression of >5% on any metric fails the build.
 
@@ -1380,7 +1614,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-## 11. Security Tests
+## 13. Security Tests
 
 ### SEC-001 · Unauthenticated API request — 401 on every endpoint
 
@@ -1456,7 +1690,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
-## 12. Pi-hole Compatibility Tests
+## 14. Pi-hole Compatibility Tests
 
 ### COMPAT-001 · Summary endpoint returns Pi-hole v5 schema
 
@@ -1543,7 +1777,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 |-----------|----------------------|
 | v0.1 | DNS-U-001 through 016; BL-U-001 through 008; DNS-I-001 through 012; BL-I-001, 003, 006; BUS-I-001 through 003; API-I-001 through 007 |
 | v0.2 | All v0.1 gates + BL-I-001 through 006; BUS-I-004 through 006; COMPAT-001 through 006 |
-| v0.3 | All v0.2 gates + DNS-I-005 through 010; DNS-I-011, 012 |
+| v0.3 | All v0.2 gates + DNS-I-005 through 012; ZONE-U-001 through 008; ZONE-I-001 through 013 |
 | v0.4 | All v0.3 gates + PERF-L-001 through 006; SEC-001 through 007 |
 | v0.5 (DHCP) | All v0.4 gates + DHCP-U-001 through 013; DHCP-I-001 through 013; DDNS-I-001 through 009; API-I-008 through 014; BUS-I-007, 008 |
 | v0.6 (HA) | All v0.5 gates + PERF-L-007 through 011; BUS-I-006 through 008 |

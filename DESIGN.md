@@ -18,7 +18,7 @@ Pi-hole is the de facto home DNS sinkhole, but it carries a decade of design con
 - DHCP and DNS are managed separately with no automatic integration between them.
 - A monolithic architecture makes adding new functionality require touching the core process.
 
-DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **event-driven**, **container-native**, with first-class blocklist support, a fully integrated DHCPv4/DHCPv6 server, and compatibility with the existing Pi-hole ecosystem.
+DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **event-driven**, **container-native**, with first-class blocklist support, a fully integrated DHCPv4/DHCPv6 server, authoritative local zone hosting, and compatibility with the existing Pi-hole ecosystem.
 
 ---
 
@@ -37,10 +37,11 @@ DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **even
 | G8 | Be drop-in compatible with existing Pi-hole browser extensions and mobile apps that use the Pi-hole API. |
 | G9 | **Loose coupling via an event bus.** The DNS hot path offloads all side-effects asynchronously. New functionality is added by subscribing to the bus — zero changes to the DNS container. |
 | G10 | **First-class DHCPv4 and DHCPv6 server** with full RFC option support, static reservations, PXE boot, DHCP relay, and automatic DNS record registration on lease assignment. |
+| G11 | **Authoritative local DNS server** for any zone it owns. DNSDave answers authoritatively (AA flag set, SOA in authority section) for configured zones and never forwards those queries upstream. Supports zone transfers (AXFR/IXFR), NOTIFY to secondaries, and RFC 2136 dynamic updates. |
 
 ### Non-Goals (v1)
 
-- Building a full recursive resolver (we forward upstream).
+- Building a full recursive resolver (we forward upstream for non-local zones).
 - DNSSEC signing of local zones.
 - A bundled web UI (the API is the product; a reference SPA can come later).
 
@@ -159,6 +160,13 @@ dnsdave.
 │   └── discover.{scope_id}         # DISCOVER received (core, analytics only)
 │                                    # Delivery: JetStream for lease.* ; core for discover
 │
+├── zone.
+│   ├── serial.updated.{zone_name}  # SOA serial changed; triggers ArcSwap + NOTIFY
+│   ├── record.created.{zone_name}  # record added to a zone (de-duplicates with config.record)
+│   ├── record.deleted.{zone_name}  # record removed from a zone
+│   └── transfer.requested.{zone_name}  # AXFR/IXFR request logged (core, analytics)
+│                                    # Delivery: JetStream for serial.updated + record.*
+│
 └── upstream.
     └── health.{upstream_id}         # healthy | degraded | down (core)
 ```
@@ -170,6 +178,7 @@ dnsdave.
 | `DNSDAVE_CONFIG` | `dnsdave.config.>` | All messages | Config replay for new/restarted DNS nodes |
 | `DNSDAVE_BLOCKLIST` | `dnsdave.blocklist.>` | Last per subject | Blocklist diff replay |
 | `DNSDAVE_DHCP` | `dnsdave.dhcp.lease.>` | 90 days | Lease history; replayed by DNS nodes for dynamic record state |
+| `DNSDAVE_ZONES` | `dnsdave.zone.>` | All messages | Zone / SOA state replay — new DNS nodes self-bootstrap zone authority and serial state |
 | `DNSDAVE_QUERYLOG` | `dnsdave.query.>` | 24h rolling | Audit / log writer catch-up |
 
 ### 4.4 NATS Object Store (Bloom Filters)
@@ -268,20 +277,24 @@ flowchart TD
     C --> D{"3  Allowlist\nexact match?"}
     D -->|hit| R1(["Return NOERROR"])
     D -->|miss| E{"4  Local record\nexact match?"}
-    E -->|hit| R2(["Return answer"])
+    E -->|hit| R2(["Return answer · set AA=1 if name in owned zone"])
     E -->|miss| F{"5  Wildcard trie\nmatch?"}
-    F -->|hit| R3(["Return answer"])
-    F -->|miss| G{"6  Bloom filter\nnegative?"}
-    G -->|"negative\nguaranteed not blocked"| I
-    G -->|positive| H{"7  Blocklist HashMap\nconfirmed blocked?"}
-    H -->|blocked| R4(["Encode NXDOMAIN\nPublish QueryEvent → NATS\nReturn buffer"])
-    H -->|false positive| I{"8  Answer cache\nhit?"}
-    I -->|hit| R5(["Encode cached answer\nPublish QueryEvent → NATS\nReturn buffer"])
-    I -->|miss| J["9  Forward upstream\ntokio · HTTP/2 DoH pool"]
-    J --> K(["Cache answer · Encode response\nPublish QueryEvent → NATS\nReturn buffer"])
+    F -->|hit| R3(["Return answer · set AA=1 if name in owned zone"])
+    F -->|miss| G{"6  Zone authority\ncheck — ArcSwap suffix trie"}
+    G -->|"in owned zone\nno record exists"| R6(["Encode NXDOMAIN + SOA in authority\nAA=1 · Publish QueryEvent → NATS\nNEVER forward upstream"])
+    G -->|"not in any owned zone"| H{"7  Bloom filter\nnegative?"}
+    H -->|"negative\nguaranteed not blocked"| J
+    H -->|positive| I{"8  Blocklist HashMap\nconfirmed blocked?"}
+    I -->|blocked| R4(["Encode NXDOMAIN\nPublish QueryEvent → NATS\nReturn buffer"])
+    I -->|false positive| J{"9  Answer cache\nhit?"}
+    J -->|hit| R5(["Encode cached answer\nPublish QueryEvent → NATS\nReturn buffer"])
+    J -->|miss| K["10  Forward upstream\ntokio · HTTP/2 DoH pool"]
+    K --> L(["Cache answer · Encode response\nPublish QueryEvent → NATS\nReturn buffer"])
 ```
 
-The NATS publish in steps 7, 8, and 10 is a **non-blocking write to the async-nats client buffer** — no syscall, no network boundary on the hot path.
+The NATS publish in steps 6, 8, 9, and 10 is a **non-blocking write to the async-nats client buffer** — no syscall, no network boundary on the hot path.
+
+**Critical semantic for step 6:** DNSDave never forwards queries for zones it owns to an upstream resolver. If a name is within an owned zone and has no record, the response is authoritative NXDOMAIN (AA=1, SOA in authority section). This prevents information leakage and ensures local resolution is always definitive.
 
 ### 5.2 UDP I/O — Multi-Socket with SO_REUSEPORT
 
@@ -310,6 +323,7 @@ All hot-path lookups use `ArcSwap` — readers load an Arc with a single atomic 
 | Allowlist set | `ArcSwap<HashSet<DomainKey>>` | Swap on config event |
 | Local records map | `ArcSwap<HashMap<DomainKey, Vec<Record>>>` | Swap on config or DHCP lease event |
 | Wildcard trie | `ArcSwap<LabelTrie>` | Swap on config event |
+| Zone authority trie | `ArcSwap<ZoneTrie>` | Swap on `dnsdave.zone.*` config event — holds SOA per zone |
 
 ### 5.5 Blocklist In-Memory Layout
 
@@ -369,7 +383,7 @@ All hot-path lookups use `ArcSwap` — readers load an Arc with a single atomic 
 Resolution priority:
 
 ```
-exact match  >  wildcard match (longest suffix wins)  >  blocklist check  >  upstream
+exact match  >  wildcard match (longest suffix wins)  >  zone authority (NXDOMAIN if in owned zone)  >  blocklist check  >  upstream
 ```
 
 A `recursive_wildcard` flag enables multi-label matching. The wildcard trie is keyed right-to-left by DNS label, copy-on-write, published via `ArcSwap`.
@@ -381,6 +395,74 @@ Named views assign different responses to different client groups. View assignme
 ### 6.4 Upstream Resolver Configuration
 
 DoH upstreams use persistent HTTP/2 connections (one per upstream, multiplexed). Health-checked continuously; state published to `dnsdave.upstream.health.*`.
+
+### 6.5 Local Zone Management
+
+DNSDave can be the **authoritative primary** (or secondary) DNS server for any zone, allowing it to act as a full local DNS server — not just a forwarder. This is distinct from simple local records: zones give DNSDave authority over an entire namespace with proper RFC-compliant semantics.
+
+#### Zone Configuration
+
+```jsonc
+// POST /api/v1/dns/zones
+{
+  "name":    "home.arpa",          // RFC 8375 — canonical home network zone
+  "type":    "primary",            // "primary" | "secondary"
+  "ttl":     300,                  // default record TTL
+  "soa": {
+    "mname":   "ns1.home.arpa",    // primary nameserver FQDN
+    "rname":   "admin.home.arpa",  // responsible mailbox (@ → .)
+    "refresh": 3600,
+    "retry":   900,
+    "expire":  604800,
+    "minimum": 60                  // negative caching TTL (RFC 2308)
+  },
+  "allow_transfer": ["192.168.0.0/16"],  // CIDRs allowed to request AXFR/IXFR
+  "allow_update":   ["192.168.1.0/24"], // CIDRs allowed RFC 2136 DNS UPDATE
+  "notify":         ["192.168.1.2"]     // secondaries to NOTIFY on serial change
+}
+```
+
+Typical local zones:
+
+| Zone | Purpose |
+|------|---------|
+| `home.arpa` | Home network forward records (RFC 8375) |
+| `168.192.in-addr.arpa` | Reverse zone for 192.168.0.0/16 |
+| `1.0.10.in-addr.arpa` | Reverse zone for 10.1.0.0/24 |
+| `8.b.d.0.1.0.0.2.ip6.arpa` | IPv6 reverse zone |
+| `internal.example.com` | Corporate split-horizon internal names |
+
+#### SOA Serial Auto-Increment
+
+Every mutation to records within a zone (via REST API, DHCP DDNS, or RFC 2136) atomically increments the zone's SOA serial in Postgres (format `YYYYMMDDnn`, wraps via RFC 1982 arithmetic). The change is published to `dnsdave.zone.serial.updated` and propagated to all DNS nodes via NATS. Each receiving node swaps its `ZoneTrie` via `ArcSwap`.
+
+#### Zone Transfers (AXFR / IXFR)
+
+`dnsdave-dns` serves zone transfers over TCP port 53. Transfers are restricted to `allow_transfer` CIDRs.
+
+| Protocol | Description |
+|----------|-------------|
+| AXFR | Full zone transfer — streams all records in the zone |
+| IXFR | Incremental transfer — streams only records changed since a given serial, sourced from `dns_zone_changes` |
+
+#### NOTIFY
+
+On every serial increment, `dnsdave-dns` sends RFC 1996 NOTIFY packets to all configured secondary nameservers in the zone's `notify` list. Retransmitted with exponential back-off until the secondary responds.
+
+#### RFC 2136 Dynamic DNS Update
+
+DNSDave accepts DNS UPDATE packets (RFC 2136) on port 53/TCP. This standard protocol is used by:
+
+- **certbot / ACME DNS-01** — automatic certificate issuance
+- **Kubernetes ExternalDNS** (webhook or RFC 2136 mode) — register service IPs
+- **Kea DHCP** DDNS — register non-dnsdave clients
+- **Ansible / Terraform** DNS modules
+
+Updates are validated against `allow_update` CIDRs, translated to the same record-write path as the REST API, and published to `dnsdave.zone.serial.updated` on NATS so all nodes see the change within milliseconds.
+
+#### mDNS Unicast Bridge *(future)*
+
+A planned optional module bridges mDNS/Bonjour announcements (multicast `224.0.0.251:5353`) into a configured zone as unicast-accessible A/AAAA/PTR records. Devices that announce via mDNS (Apple TV, printers, smart speakers) become reachable as `device.home.arpa` from standard DNS clients.
 
 ---
 
@@ -661,6 +743,13 @@ struct LeaseEvent {
 │   ├── POST   token
 │   └── DELETE token
 ├── dns/
+│   ├── zones/
+│   │   ├── GET    /                  # list all zones
+│   │   ├── POST   /                  # create zone (primary or secondary)
+│   │   ├── GET    /:name             # zone detail including SOA
+│   │   ├── PUT    /:name             # update zone config / SOA
+│   │   ├── DELETE /:name             # remove zone (and all its records)
+│   │   └── POST   /:name/notify      # manually trigger NOTIFY to secondaries
 │   ├── records/
 │   │   ├── GET    /
 │   │   ├── POST   /
@@ -742,8 +831,33 @@ struct LeaseEvent {
 ### 10.1 Core Tables
 
 ```sql
+CREATE TABLE dns_zones (
+    name        TEXT PRIMARY KEY,         -- zone apex, e.g. "home.arpa"
+    zone_type   TEXT NOT NULL DEFAULT 'primary',  -- primary | secondary
+    default_ttl INTEGER NOT NULL DEFAULT 300,
+    -- SOA fields
+    soa_mname   TEXT NOT NULL,            -- primary nameserver FQDN
+    soa_rname   TEXT NOT NULL,            -- responsible mailbox (@ → .)
+    soa_serial  BIGINT NOT NULL DEFAULT 2026010101,
+    soa_refresh INTEGER NOT NULL DEFAULT 3600,
+    soa_retry   INTEGER NOT NULL DEFAULT 900,
+    soa_expire  INTEGER NOT NULL DEFAULT 604800,
+    soa_minimum INTEGER NOT NULL DEFAULT 60,
+    -- Transfer / update control
+    allow_transfer  JSONB NOT NULL DEFAULT '[]',  -- list of CIDRs
+    allow_update    JSONB NOT NULL DEFAULT '[]',  -- CIDRs for RFC 2136 UPDATE
+    notify          JSONB NOT NULL DEFAULT '[]',  -- list of secondary IPs to NOTIFY
+    enabled     BOOLEAN DEFAULT TRUE,
+    comment     TEXT,
+    created_at  TIMESTAMP DEFAULT NOW(),
+    updated_at  TIMESTAMP DEFAULT NOW()
+);
+
+-- Records that are within a zone are linked by zone_name for AXFR/IXFR generation.
+-- Records without a zone_name are "floating" local records (forward-only if not in any zone).
 CREATE TABLE dns_records (
     id          TEXT PRIMARY KEY,
+    zone_name   TEXT REFERENCES dns_zones(name) ON DELETE CASCADE,
     view_id     TEXT REFERENCES views(id) ON DELETE SET NULL,
     name        TEXT NOT NULL,
     type        TEXT NOT NULL,
@@ -753,13 +867,28 @@ CREATE TABLE dns_records (
     wildcard    BOOLEAN DEFAULT FALSE,
     recursive   BOOLEAN DEFAULT FALSE,
     enabled     BOOLEAN DEFAULT TRUE,
-    source      TEXT DEFAULT 'manual',   -- manual | dhcp_lease
+    source      TEXT DEFAULT 'manual',   -- manual | dhcp_lease | rfc2136
     lease_id    TEXT,                    -- FK to dhcp_leases if source=dhcp_lease
     comment     TEXT,
     created_at  TIMESTAMP DEFAULT NOW(),
     updated_at  TIMESTAMP DEFAULT NOW(),
-    UNIQUE(view_id, name, type)
+    UNIQUE(zone_name, view_id, name, type)
 );
+
+-- IXFR change log: every record add/remove in a zone is appended here.
+-- Allows serving IXFR (incremental zone transfer) to secondary nameservers.
+CREATE TABLE dns_zone_changes (
+    id          BIGSERIAL PRIMARY KEY,
+    zone_name   TEXT NOT NULL REFERENCES dns_zones(name) ON DELETE CASCADE,
+    serial      BIGINT NOT NULL,          -- SOA serial at time of change
+    action      TEXT NOT NULL,            -- 'add' | 'remove'
+    name        TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    ttl         INTEGER NOT NULL,
+    changed_at  TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_zone_changes_zone_serial ON dns_zone_changes(zone_name, serial);
 
 CREATE TABLE lists (
     id              TEXT PRIMARY KEY,
@@ -949,7 +1078,8 @@ CREATE INDEX idx_dhcp_leases_scope    ON dhcp_leases(scope_id);
 | MPHF blocklist index | ~42 MB |
 | moka answer cache | ~150 MB |
 | Local records + trie (incl. lease records) | <10 MB |
-| **Total RSS** | **~300 MB** |
+| Zone authority trie + SOA table | <1 MB |
+| **Total RSS** | **~301 MB** |
 
 ---
 
@@ -1240,11 +1370,20 @@ NATS per-container permissions:
 - [ ] Groups + per-group blocklist policy
 - [ ] Pi-hole API shim (v5)
 
-### v0.3 — Advanced DNS
+### v0.3 — Advanced DNS + Local Zone Authority
 - [ ] Wildcard records + copy-on-write label trie
 - [ ] CNAME chaining, PTR, split-horizon views
 - [ ] DoT + DoH upstream with HTTP/2 connection pooling
 - [ ] Negative caching; cache pre-warming from JetStream replay
+- [ ] Zone management (`dns_zones` table, SOA, NS records)
+- [ ] Zone authority check in hot path — authoritative NXDOMAIN + SOA for owned zones
+- [ ] `ZoneTrie` ArcSwap structure; `DNSDAVE_ZONES` JetStream stream
+- [ ] AXFR (full zone transfer) served over TCP port 53
+- [ ] IXFR (incremental zone transfer) from `dns_zone_changes` log
+- [ ] RFC 1996 NOTIFY to configured secondary nameservers on serial change
+- [ ] RFC 2136 DNS UPDATE ingest (ACME, ExternalDNS, Kea DDNS)
+- [ ] SOA serial auto-increment on every record write within a zone
+- [ ] Built-in zones: `home.arpa` template, reverse zone wizards
 
 ### v0.4 — Production readiness
 - [ ] DoT listener (:853) + DoH listener (:8080/dns-query)
@@ -1339,7 +1478,7 @@ All containers are Rust for consistency. `dhcproto` covers DHCPv4 and DHCPv6 wit
 ## 16. Open Questions
 
 1. **Web UI scope** — API-only for v1, or ship a minimal read-only Svelte dashboard subscribing to SSE streams?
-2. **RPZ as output** — Serve RPZ zones to downstream resolvers by consuming `dnsdave.blocklist.*`?
+2. **RPZ as output** — Serve RPZ zones to downstream resolvers by consuming `dnsdave.blocklist.*`? (Note: DNSDave can already ingest RPZ format. Serving RPZ to downstream resolvers is a separate feature.)
 3. **DoH port** — Serve DoH on `:8080/dns-query` (shared with API) or dedicated `:443`?
 4. **Multi-tenancy** — First-class namespace/org concept for SaaS, or single-tenant-per-instance?
 5. **`dnsdave-stats` persistence** — In-memory only (lost on restart) or checkpoint to NATS KV periodically?
@@ -1347,3 +1486,6 @@ All containers are Rust for consistency. `dhcproto` covers DHCPv4 and DHCPv6 wit
 7. **Bloom filter fetch at startup** — 90MB bloom filter is ~700 NATS Object Store chunks. Benchmark fetch + reassemble time vs. direct Postgres read. If Postgres is faster, use it only for startup and NATS only for live updates.
 8. **DHCP HA across broadcast domains** — In a multi-site Kubernetes deployment, each node needs a DHCP server on its local broadcast domain. DaemonSet is the right primitive, but leader election must be per-node, not cluster-wide. Design the NATS KV lock key as `dhcp.leader.{node_name}`.
 9. **DHCPv6 prefix delegation (IA_PD)** — For ISP-style deployments where `dnsdave-dhcp` delegates IPv6 prefixes to customer routers. Scope for v0.5 or push to v1?
+10. **RFC 2136 TSIG auth** — DNS UPDATE packets can be authenticated with TSIG (HMAC-MD5 / HMAC-SHA256). Should this be required for RFC 2136 updates, or is IP-CIDR (`allow_update`) sufficient for v0.3?
+11. **mDNS unicast bridge** — Is the mDNS→unicast bridge in scope for v0.6, or only if there is user demand? Requires binding a multicast socket which may conflict with host mDNS daemons (avahi, mDNSResponder).
+12. **Secondary zone bootstrapping** — For `zone_type = secondary`, DNSDave must initiate an initial AXFR from the primary on zone creation. Which TCP connection pool handles this (reuse `dnsdave-dns` or a dedicated worker)?

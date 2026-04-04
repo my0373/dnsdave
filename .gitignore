@@ -1,0 +1,131 @@
+# ============================================================
+# Secrets & credentials — never commit these
+# ============================================================
+.env
+.env.*
+!.env.example
+secrets/
+secrets.yaml
+secrets.yml
+secrets.json
+*_secret*
+*_secrets*
+*secret*.yaml
+*secret*.yml
+*secret*.json
+credentials
+credentials.*
+api_key*
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+# but allow example/template certs
+!certs/example/
+!*.example.crt
+
+# TLS / ACME artefacts
+certs/
+tls/
+acme/
+*.acme.json
+
+# Docker / Compose secrets
+docker-compose.override.yml
+.docker/
+
+# Kubernetes secrets & generated manifests with embedded secrets
+*secret*.yaml
+*secret*.yml
+deploy/helm/**/charts/
+deploy/helm/**/Chart.lock
+kubeconfig
+kubeconfig.*
+.kube/
+
+# NATS credentials & nkeys
+*.nk
+*.creds
+nkeys/
+
+# SSH private keys (just in case)
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
+*.pem
+
+# ============================================================
+# Database files (may contain real query logs / config)
+# ============================================================
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+data/
+nats-data/
+pg-data/
+
+# ============================================================
+# Rust build artefacts
+# ============================================================
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# ============================================================
+# Logs & runtime data
+# ============================================================
+*.log
+logs/
+*.pid
+*.sock
+
+# ============================================================
+# IDE & editor files
+# ============================================================
+.idea/
+*.iml
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# ============================================================
+# Benchmark & profiling output
+# ============================================================
+benchmarks/*.pprof
+benchmarks/*.out
+flamegraph.svg
+perf.data
+perf.data.old
+*.profraw
+*.profdata
+
+# ============================================================
+# Compiled binaries
+# ============================================================
+/dnsdave-dns
+/dnsdave-api
+/dnsdave-sync
+/dnsdave-log
+/dnsdave-stats
+dist/
+
+# ============================================================
+# OS & temp files
+# ============================================================
+.tmp/
+tmp/
+*.tmp
+*.bak
+*.orig

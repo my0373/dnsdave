@@ -1956,6 +1956,65 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 
 ---
 
+### SEC-008 · Self-signed cert generated on first boot
+
+| Field | Value |
+|-------|-------|
+| Setup | Fresh deployment, no cert configured, no `DNSDAVE_ACME_DOMAIN` set |
+| Step 1 | Start `dnsdave-api` |
+| Expected | TLS cert present in `tls_certificates` table; `source = 'self_signed'`; API reachable over HTTPS; health endpoint reports `cert_source: self_signed` warning |
+| Pass | HTTPS available within 10 seconds of startup without manual cert config |
+
+---
+
+### SEC-009 · ACME DNS-01 certificate issuance (staging CA)
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `test.home.arpa` configured as primary; ACME staging CA URL configured; `DNSDAVE_ACME_DOMAIN=api.test.home.arpa` |
+| Step 1 | Trigger ACME flow via API |
+| Expected | `_acme-challenge.api.test.home.arpa TXT` record appears and is removed after validation; cert issued and stored in `tls_certificates`; `dnsdave.config.tls.renewed` NATS event published |
+| Pass | Cert issued by staging CA; `source = 'acme'`; TXT record not present after issuance |
+
+---
+
+### SEC-010 · TLS cert hot-reload — no restart required
+
+| Field | Value |
+|-------|-------|
+| Setup | HTTPS API running with certificate A |
+| Step 1 | Insert a new cert (certificate B) into `tls_certificates` and publish `dnsdave.config.tls.renewed` |
+| Step 2 | Open new TLS connection to API |
+| Expected | New connection uses certificate B; old connections continue unaffected; no service restart |
+| Pass | Certificate rotated within 5 seconds; zero dropped requests during rotation |
+
+---
+
+### SEC-011 · NATS connection requires TLS — plaintext rejected
+
+| Field | Value |
+|-------|-------|
+| Setup | NATS server configured with TLS-only (`--no_tls=false`) |
+| Input | Attempt to connect to NATS port 4222 without TLS |
+| Expected | Connection refused or TLS handshake failure; no data exchanged |
+| Pass | Plaintext NATS connection rejected |
+
+---
+
+### SEC-012 · ACME DNS-01 helper — certbot RFC 2136 places TXT record
+
+| Field | Value |
+|-------|-------|
+| Setup | Zone `home.arpa` with `allow_update: ["127.0.0.1/32"]`; simulate certbot DNS-01 challenge |
+| Step 1 | Send RFC 2136 UPDATE to add `_acme-challenge.svc.home.arpa TXT "token123" TTL=60` |
+| Step 2 | Query `_acme-challenge.svc.home.arpa TXT` |
+| Expected | TXT record resolves with value `token123`; AA=1 |
+| Step 3 | Send RFC 2136 UPDATE to delete the TXT record |
+| Expected | Record removed; subsequent query returns NXDOMAIN with AA=1 |
+| Pass | Full ACME DNS-01 challenge cycle succeeds |
+
+---
+
 ## 18. Pi-hole Compatibility Tests
 
 ### COMPAT-001 · Summary endpoint returns Pi-hole v5 schema
@@ -2044,7 +2103,7 @@ All load tests run on a **dedicated 4-core host** (not CI). Results are recorded
 | v0.1 | DNS-U-001 through 016; BL-U-001 through 008; DNS-I-001 through 012; BL-I-001, 003, 006; BUS-I-001 through 003; API-I-001 through 007 |
 | v0.2 | All v0.1 gates + BL-I-001 through 006; BUS-I-004 through 006; COMPAT-001 through 006 |
 | v0.3 | All v0.2 gates + DNS-I-005 through 012; ZONE-U-001 through 008; ZONE-I-001 through 013; FWD-U-001 through 003; FWD-I-001 through 005 |
-| v0.4 | All v0.3 gates + DNSSEC-U-001 through 004; DNSSEC-I-001 through 003; PERF-L-001 through 006; SEC-001 through 007 |
+| v0.4 | All v0.3 gates + DNSSEC-U-001 through 004; DNSSEC-I-001 through 003; PERF-L-001 through 006; SEC-001 through 012 |
 | v0.4.5 | All v0.4 gates + DNSSEC-U-005 through 007; DNSSEC-I-004 through 008 |
 | v0.5 (DHCP) | All v0.4 gates + DHCP-U-001 through 013; DHCP-I-001 through 013; DDNS-I-001 through 009; API-I-008 through 014; BUS-I-007, 008 |
 | v0.6 (HA) | All v0.5 gates + PERF-L-007 through 011; BUS-I-006 through 008 |

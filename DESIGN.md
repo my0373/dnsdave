@@ -483,6 +483,10 @@ DNSDave accepts DNS UPDATE packets (RFC 2136) on port 53/TCP. This standard prot
 
 Updates are validated against `allow_update` CIDRs, translated to the same record-write path as the REST API, and published to `dnsdave.zone.serial.updated` on NATS so all nodes see the change within milliseconds.
 
+#### ACME DNS-01 Certificate Issuance
+
+Because DNSDave is authoritative for its owned zones, it can fulfil ACME DNS-01 challenges for itself and for any other service in the local environment. The ACME client in `dnsdave-api` places `_acme-challenge.` TXT records via its own RFC 2136 interface and removes them automatically after validation. See §13.1 for full details.
+
 #### mDNS Unicast Bridge *(future)*
 
 A planned optional module bridges mDNS/Bonjour announcements (multicast `224.0.0.251:5353`) into a configured zone as unicast-accessible A/AAAA/PTR records. Devices that announce via mDNS (Apple TV, printers, smart speakers) become reachable as `device.home.arpa` from standard DNS clients.
@@ -1355,15 +1359,55 @@ networks:
 
 > **Note on DHCP networking:** DHCP DISCOVER packets are UDP broadcast and cannot traverse Docker bridge networks by default. `dnsdave-dhcp` should use `network_mode: host` or be run with `--network host` so it receives raw broadcast traffic on port 67. In Kubernetes, use `hostNetwork: true` on the DHCP pod.
 
-### 11.2 Minimal Stack
+### 11.2 TLS in Docker Compose / Podman
 
-A `docker-compose.minimal.yml` runs only `dnsdave-dns`, `dnsdave-dhcp`, `dnsdave-api`, and NATS with SQLite. Query logging is written directly by `dnsdave-api`. Stats are disabled.
+All inter-container connections run over TLS. Certificates are generated on first startup by `dnsdave-api` using `rcgen` and stored in the `tls_certificates` Postgres table. Containers receive the CA cert as an environment variable or mounted file.
 
-### 11.3 Podman Compose
+```yaml
+  nats:
+    command: [
+      "-js", "-m", "8222",
+      "--tls",
+      "--tlscert", "/certs/nats.crt",
+      "--tlskey",  "/certs/nats.key",
+      "--tlscacert", "/certs/ca.crt"
+    ]
+    volumes:
+      - nats-certs:/certs   # written by dnsdave-api on bootstrap
+
+  postgres:
+    environment:
+      POSTGRES_SSL_CERT: /certs/pg.crt
+      POSTGRES_SSL_KEY:  /certs/pg.key
+    volumes:
+      - pg-certs:/certs
+
+  dnsdave-api:
+    environment:
+      DNSDAVE_NATS_TLS_CA:   "/certs/ca.crt"
+      DNSDAVE_DB_URL: "postgres://dnsdave:${POSTGRES_PASSWORD}@postgres/dnsdave?sslmode=verify-full&sslrootcert=/certs/ca.crt"
+      DNSDAVE_TLS_CERT: "/certs/api.crt"
+      DNSDAVE_TLS_KEY:  "/certs/api.key"
+      DNSDAVE_ACME_EMAIL:    "${ACME_EMAIL:-}"         # if set, attempts ACME; else self-signed
+      DNSDAVE_ACME_DOMAIN:   "${DNSDAVE_DOMAIN:-}"
+    volumes:
+      - api-certs:/certs
+```
+
+**Bootstrap sequence:**
+1. `dnsdave-api` starts first; generates a local CA + all service certs into a shared volume.
+2. NATS and Postgres start with their certs in place.
+3. All other containers mount the CA cert and verify peers.
+
+### 11.3 Minimal Stack
+
+A `docker-compose.minimal.yml` runs only `dnsdave-dns`, `dnsdave-dhcp`, `dnsdave-api`, and NATS with SQLite. Query logging is written directly by `dnsdave-api`. Stats are disabled. TLS is still enabled; self-signed cert generated on first boot.
+
+### 11.4 Podman Compose
 
 The same compose files work with `podman-compose`. Quadlet-compatible unit files are provided for rootless Podman. `dnsdave-dhcp` requires `--cap-add=NET_BIND_SERVICE` and host network access for broadcast.
 
-### 11.4 Kubernetes / Helm
+### 11.5 Kubernetes / Helm
 
 ```
 deploy/helm/dnsdave/
@@ -1379,12 +1423,14 @@ deploy/helm/dnsdave/
     ├── service-api.yaml
     ├── ingress-api.yaml
     ├── hpa-api.yaml
-    └── servicemonitor.yaml
+    ├── servicemonitor.yaml
+    ├── certificate-api.yaml          # cert-manager Certificate resource
+    └── certificate-nats.yaml         # cert-manager Certificate for NATS cluster
 ```
 
 Both `dnsdave-dns` and `dnsdave-dhcp` run as **DaemonSets** with `hostNetwork: true`. DNS binds port 53; DHCP binds ports 67/547 to receive broadcasts directly on each node.
 
-### 11.5 Scaling the Stack
+### 11.6 Scaling the Stack
 
 | Container | Scale-out strategy |
 |-----------|-------------------|
@@ -1397,7 +1443,7 @@ Both `dnsdave-dns` and `dnsdave-dhcp` run as **DaemonSets** with `hostNetwork: t
 | `nats` | 3-node JetStream cluster for HA. |
 | `postgres` | Patroni HA. TimescaleDB for `query_log` at very high QPS. |
 
-### 11.6 Configuration Priority
+### 11.7 Configuration Priority
 
 ```
 CLI flags > Environment Variables > Config file (YAML) > Defaults
@@ -1472,19 +1518,104 @@ All containers emit JSON logs. Correlate across containers using a `trace_id` em
 | Unauthenticated DNS | Standard; API always requires key/JWT |
 | Unauthenticated DHCP | Standard protocol; rogue server protection via NATS leader election (only one active DHCP server per broadcast domain) |
 | API key storage | Argon2id-hashed at rest; never logged |
-| DoT/DoH TLS | ACME auto-provisioned or BYO cert |
-| NATS auth | Per-container NKey credentials; deny-all default ACLs |
+| DoT/DoH TLS | ACME auto-provisioned (public domains) or local CA (private deployments) — see §13.1 |
+| NATS auth | Per-container NKey credentials; deny-all default ACLs; TLS on all NATS connections |
 | DHCP option injection | Options stored as typed values; raw hex only for explicitly declared custom codes |
 | Rate limiting | Per-client DNS token bucket; API token bucket; DHCP DISCOVER rate limit per MAC |
 | Log retention | `query_log` and `dhcp_leases` auto-purged (default 30 days / 90 days respectively) |
 | Container isolation | `distroless/static` base; no shell |
 | Secrets | `.env` or Kubernetes `Secret`; never baked into images |
 | CORS | Configurable allowed origins |
+| Postgres TLS | All container→Postgres connections require `sslmode=verify-full`; CA cert mounted as a volume |
 
 NATS per-container permissions:
-- `dnsdave-dns`: publish `dnsdave.query.*`; subscribe `dnsdave.config.>`, `dnsdave.blocklist.>`, `dnsdave.dhcp.lease.>`
+- `dnsdave-dns`: publish `dnsdave.query.*`; subscribe `dnsdave.config.>`, `dnsdave.blocklist.>`, `dnsdave.dhcp.lease.>`, `dnsdave.zone.>`, `dnsdave.dnssec.>`
 - `dnsdave-dhcp`: publish `dnsdave.dhcp.lease.*`; subscribe `dnsdave.config.>`; no publish on config subjects
-- `dnsdave-api`: publish `dnsdave.config.*`; no publish on query or lease subjects
+- `dnsdave-api`: publish `dnsdave.config.*`, `dnsdave.zone.*`, `dnsdave.dnssec.*`; no publish on query or lease subjects
+
+### 13.1 Certificate Management
+
+Certificates are needed in three places: **DNSDave's own services**, **inter-container transport**, and **ACME challenge delegation to other services**.
+
+#### DNSDave's Own Services
+
+All three TLS endpoints (REST API, DoT :853, DoH) can share a single certificate or use separate certs:
+
+| Endpoint | Port | Notes |
+|----------|------|-------|
+| REST API (HTTPS) | 8080 / 443 | Clients, browser UI, Pi-hole shim |
+| DNS-over-TLS | 853 | Mobile resolvers (iOS, Android, Quad9-compatible) |
+| DNS-over-HTTPS | 8080/dns-query | DoH clients, browsers |
+
+**Deployment mode determines the certificate source:**
+
+| Deployment | Certificate source | Notes |
+|------------|-------------------|-------|
+| Public domain | ACME (Let's Encrypt / ZeroSSL) | DNS-01 challenge via RFC 2136 to own authoritative zone (no port 80 needed) |
+| Private / home lab | Local CA or self-signed | `rcgen` generates a self-signed cert on first boot; or mount a cert from a local CA (Step CA, XCA, cfssl) |
+| Kubernetes | cert-manager | Annotate the `Ingress` / `Certificate` resource; cert-manager handles renewal |
+
+**ACME challenge strategy for DNSDave itself:** Because DNSDave is authoritative for its own zone, it can satisfy DNS-01 challenges by writing `_acme-challenge.` TXT records via its own RFC 2136 interface. The `dnsdave-api` container includes an ACME client (`instant-acme` crate) that:
+
+1. Requests a certificate from the ACME CA.
+2. Places the DNS-01 challenge TXT record via RFC 2136 to `dnsdave-dns`.
+3. Notifies the CA to validate.
+4. Removes the TXT record on success.
+5. Stores the issued cert + key in the `tls_certificates` table (encrypted) and publishes `dnsdave.config.tls.renewed` to NATS.
+6. All DNS and API containers reload the cert in-memory within seconds of the NATS event.
+
+Self-signed bootstrap: on first start without a configured cert, `dnsdave-api` generates a self-signed cert via `rcgen` (valid 90 days, auto-regenerated). A warning is emitted and surfaced in the API health endpoint.
+
+#### Certificate Storage
+
+```sql
+CREATE TABLE tls_certificates (
+    id           TEXT PRIMARY KEY,
+    domain       TEXT NOT NULL,
+    source       TEXT NOT NULL,   -- 'acme' | 'self_signed' | 'manual'
+    cert_pem_enc TEXT NOT NULL,   -- AES-GCM encrypted PEM certificate chain
+    key_pem_enc  TEXT NOT NULL,   -- AES-GCM encrypted PEM private key
+    issued_at    TIMESTAMP NOT NULL,
+    expires_at   TIMESTAMP NOT NULL,
+    renewed_at   TIMESTAMP,
+    created_at   TIMESTAMP DEFAULT NOW()
+);
+```
+
+Renewal is triggered at 30 days before expiry (for ACME certs) or 7 days (self-signed) by a scheduled task in `dnsdave-api`. On renewal, `dnsdave.config.tls.renewed` is published; all DNS nodes hot-reload the new cert from Postgres without restarting.
+
+#### Inter-Container TLS (NATS + Postgres)
+
+| Connection | TLS |
+|-----------|-----|
+| Container → NATS | TLS with per-container client cert (NKey + mTLS); CA cert is the NATS deployment's CA |
+| Container → Postgres | `sslmode=verify-full`; server cert verified against a mounted CA bundle |
+| API → DNS (health check) | HTTPS with the API cert |
+
+In Docker Compose, the NATS server is started with `--tls` and certs generated by `dnsdave-api` on first boot or by a mounted volume. In Kubernetes, cert-manager issues NATS and Postgres TLS certs automatically.
+
+#### DNSDave as ACME DNS-01 Helper for Other Services
+
+Because DNSDave is an authoritative server for local zones, it can satisfy ACME DNS-01 challenges for **any other service** in the environment that needs a certificate. This is one of the most practical benefits of running a local authoritative DNS server.
+
+```bash
+# Example: issue a cert for a local Nginx instance using certbot + RFC 2136
+certbot certonly \
+  --dns-rfc2136 \
+  --dns-rfc2136-credentials /etc/certbot/dnsdave-rfc2136.ini \
+  -d nginx.home.arpa
+
+# /etc/certbot/dnsdave-rfc2136.ini
+dns_rfc2136_server  = 192.168.1.1
+dns_rfc2136_port    = 53
+dns_rfc2136_name    = nginx.home.arpa
+dns_rfc2136_secret  = <TSIG key or leave empty if IP-based allow_update>
+dns_rfc2136_algorithm = HMAC-SHA256
+```
+
+This works for any service running in the local environment: Nginx, Proxmox, Home Assistant, Kubernetes Ingress, etc. The cert is issued by Let's Encrypt (real, browser-trusted) because the ACME CA only validates that the TXT record exists at the DNS level — it doesn't care whether the server is publicly reachable.
+
+**Requirement:** The zone (`home.arpa`) must be publicly delegated to DNSDave, OR the ACME CA must be an internal CA that trusts it. For truly private zones (`home.arpa` is never publicly delegated), only an internal ACME CA (e.g., Step CA, Smallstep, HashiCorp Vault) will work. Let's Encrypt cannot validate a zone that has no public NS delegation.
 
 ---
 
@@ -1528,9 +1659,15 @@ NATS per-container permissions:
 - [ ] `/api/v1/dns/forwardzones/` CRUD; `dnsdave.config.forwardzone.*` NATS events
 - [ ] Per-forward-zone DNSSEC validation policy (strict / opportunistic / disabled)
 
-### v0.4 — Production readiness + DNSSEC validation
+### v0.4 — Production readiness + TLS + DNSSEC validation
 - [ ] DoT listener (:853) + DoH listener (:8080/dns-query)
-- [ ] TLS auto-provisioning (ACME)
+- [ ] Self-signed cert bootstrap via `rcgen` on first start (no manual config required)
+- [ ] ACME client (`instant-acme`) for public domain certificate issuance via DNS-01 over RFC 2136
+- [ ] `tls_certificates` Postgres table; hot-reload on `dnsdave.config.tls.renewed` NATS event
+- [ ] NATS TLS with per-container client certs; Postgres `sslmode=verify-full`
+- [ ] Internal CA generation and cert distribution for Docker Compose / Podman stacks
+- [ ] cert-manager `Certificate` resources for Kubernetes deployments
+- [ ] ACME DNS-01 helper: `certbot --dns-rfc2136` works against any DNSDave-owned zone
 - [ ] Prometheus metrics across all containers (µs granularity)
 - [ ] SSE live log stream via NATS
 - [ ] Helm chart v1 (DaemonSet DNS, replicated API, NATS StatefulSet)
@@ -1598,6 +1735,8 @@ NATS per-container permissions:
 | DHCP library | `dhcproto` | Pure Rust; DHCPv4 + DHCPv6 encode/decode; no C dependencies |
 | DNS library | `hickory-dns` | Primary Rust DNS library; wire format access for zero-copy; built-in DNSSEC validation and signing support |
 | DNSSEC crypto | `ring` + `rcgen` | ECDSA P-384, Ed25519 key generation and signing; no C deps on modern targets |
+| TLS cert generation | `rcgen` | Self-signed and CA cert bootstrap without OpenSSL; pure Rust |
+| ACME client | `instant-acme` | Async ACME v2 (RFC 8555); DNS-01 challenge via RFC 2136 self-update |
 | Async runtime | `tokio` | De facto standard; excellent UDP + HTTP/2 |
 | UDP batch I/O | `nix` (`recvmmsg`/`sendmmsg`) | Linux batch syscalls; `socket2` for SO_REUSEPORT |
 | Bloom filter | `bloomfilter` | Serialisable; configurable FPR |
@@ -1650,3 +1789,6 @@ All containers are Rust for consistency. `dhcproto` covers DHCPv4 and DHCPv6 wit
 14. **DNSSEC validation and Pi-hole compatibility** — Pi-hole extensions and mobile apps send DNS queries directly; they don't set the DO bit. With strict DNSSEC validation enabled, should dnsdave-dns only validate its own upstream queries, or also re-validate queries that clients request validation for (CD bit)?
 15. **DNSSEC key rollover automation** — ZSK rollover requires coordinated publish→activate→retire phases over days. Should this be managed by a cron-style job within `dnsdave-api`, or a dedicated `dnsdave-keymgr` sidecar subscribed to NATS?
 16. **Trust anchor automatic updates** — The IANA root KSK rolls every ~5 years (next: ~2026). Should DNSDave fetch the current root trust anchor from IANA's XML feed automatically, or require manual operator action?
+17. **Local CA vs external CA for private deployments** — For home labs with no public NS delegation, the ACME DNS-01 flow requires a private ACME CA (Step CA, Vault PKI, etc.). Should DNSDave ship with an embedded minimal ACME CA, or document how to integrate with an external one? Shipping one adds significant scope but removes a dependency.
+18. **Certificate SAN coverage** — DoT/DoH clients validate the server certificate hostname. In multi-node deployments (multiple `dnsdave-dns` instances), each node needs a cert that covers its individual hostname AND the shared DNS service name. Should certs use a wildcard SAN, or per-node issuance?
+19. **ACME DNS-01 for split-horizon zones** — If the zone exists only locally (no public NS delegation), Let's Encrypt cannot validate DNS-01 challenges. Should DNSDave detect this case and warn the operator, or automatically fall back to self-signed?

@@ -238,8 +238,20 @@ This document compares DNSDave against Pi-hole, major open-source DNS/DHCP tools
 | µs-granularity latency histograms | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | 🟡 |
 | Structured JSON logs | ✅ | 🟡 | ✅ | 🟡 | ❌ | ✅ | ❌ | ✅ | ✅ |
 | Query log export (CSV/JSON) | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Syslog export (rsyslog, syslog-ng)** | ✅ | ❌ | ❌ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ |
+| **OpenTelemetry (OTLP) export** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | 🟡 | 🟡 |
+| **Grafana / Loki integration** | ✅ | 🟡 | 🟡 | ❌ | ❌ | ✅ | ❌ | 🟡 | 🟡 |
+| **Elasticsearch / Logstash (ELK)** | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ✅ |
+| **Splunk HEC export** | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ✅ |
+| **InfluxDB line protocol export** | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | 🟡 |
+| **Datadog / New Relic (via OTel)** | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ✅ |
+| **HTTP webhook export** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | 🟡 |
+| Pre-built Grafana dashboards | ✅ | 🟡 | 🟡 | ❌ | ❌ | 🟡 | ❌ | 🟡 | ✅ |
+| Pre-built Kibana dashboards | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 
 > **Prometheus note:** Pi-hole and AdGuard Home both require third-party exporters (e.g. `pihole-exporter`) to expose Prometheus metrics. DNSDave, CoreDNS, and PowerDNS export them natively.
+
+> **Export note:** DNSDave's `dnsdave-export` container provides native, first-party integrations with all major log aggregation and observability platforms. Other open-source DNS tools (Pi-hole, AdGuard, CoreDNS) require separate third-party agents, custom Fluent Bit pipelines, or sidecar containers to achieve the same result. Enterprise solutions (Infoblox) typically provide syslog and SIEM integrations as paid add-ons. DNSDave ships these integrations built-in.
 
 ---
 

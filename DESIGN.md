@@ -41,6 +41,7 @@ DNSDave is a ground-up reimagining: **performance-first**, **API-first**, **even
 | G12 | **Conditional DNS forwarding.** Named forward zones route queries for specific domains to designated upstream resolvers, bypassing the global upstream pool and the blocklist. Essential for VPN/corporate split-DNS, multi-site internal networks, and ISP-delegated zones. |
 | G13 | **DNSSEC support** at two levels: (a) *validation* — verify cryptographic signatures on responses from upstream resolvers and set the AD bit; (b) *signing* — sign owned zones with ZSK/KSK key pairs, serve DNSKEY/RRSIG/NSEC3 records, and expose DS records for delegation. |
 | G14 | **Multi-architecture native binaries and container images.** Every container ships as a multi-arch manifest covering `linux/amd64`, `linux/arm64` (Raspberry Pi 3+ running 64-bit OS, Apple Silicon servers, AWS Graviton), and `linux/arm/v7` (Raspberry Pi 3+ running 32-bit OS). Development builds are supported on `macOS/arm64` (Apple Silicon) and `macOS/x86_64` without modification. |
+| G15 | **Pluggable observability export.** Logs, events, and metrics can be forwarded to any external system via a dedicated `dnsdave-export` container that subscribes to NATS and speaks the target system's native protocol — syslog (rsyslog, syslog-ng), OTLP (OpenTelemetry Collector → Grafana Loki/Tempo/Prometheus, Jaeger, Splunk, Datadog, New Relic, Honeycomb), Loki push API, InfluxDB line protocol, Elasticsearch, StatsD, and generic HTTP webhooks. Zero changes to existing containers. |
 
 ### Non-Goals (v1)
 
@@ -75,6 +76,7 @@ graph TD
         SYNC["dnsdave-sync\nBlocklist downloader + parser"]
         LOG["dnsdave-log\nQuery log bulk writer"]
         STATS["dnsdave-stats\nIn-memory stats aggregator"]
+        EXPORT["dnsdave-export\nPluggable observability exporter\nsyslog · OTLP · Loki · InfluxDB · StatsD · webhook"]
         DHCP["dnsdave-dhcp  (Rust)\n:67 UDP DHCPv4  ·  :547 UDP DHCPv6\nDORA + SARR state machines\nPXE · relay · vendor classes"]
     end
 
@@ -89,6 +91,8 @@ graph TD
     API -->|"config change events"| NATS
     NATS -->|"query events"| LOG
     NATS -->|"query events"| STATS
+    NATS -->|"all events"| EXPORT
+    EXPORT -->|"syslog / OTLP / Loki / InfluxDB / ..."| EXT[("External Systems\nrsyslog · Grafana · ELK\nSplunk · Datadog · InfluxDB")]
     SYNC -->|"blocklist diffs · bloom filter\nready signals"| NATS
     DHCP -->|"lease events"| NATS
     NATS -->|"scope config · reservations"| DHCP
@@ -109,6 +113,7 @@ graph TD
 | `dnsdave-stats` | Rust | Stats aggregator. Maintains in-memory counters. | NATS |
 | `dnsdave-dhcp` | **Rust** | DHCPv4/DHCPv6 server. Publishes lease events. Dynamic DNS via NATS. | NATS + Postgres |
 | `dnsdave-ui` | **TypeScript** (SvelteKit) | Web management UI. Proxies REST + SSE to `dnsdave-api`. No direct DB or NATS access. See `UI.md`. | `dnsdave-api` only |
+| `dnsdave-export` | **Rust** | Pluggable observability exporter. Subscribes to all NATS event subjects and forwards to configured external backends. Zero Postgres access. Optional container — omit if no external export needed. | NATS only |
 | `nats` | — | Event bus. Core pub/sub + JetStream + Object Store + KV Store. | — |
 | `postgres` | — | Primary persistent storage. | — |
 
@@ -1605,7 +1610,9 @@ Pi 4 (2 GB+) can run the full stack comfortably, including `dnsdave-log`, `dnsda
 
 ### 12.1 Metrics (Prometheus)
 
-**dnsdave-dns:**
+Every container exposes a Prometheus scrape endpoint. Grafana, VictoriaMetrics, and any Prometheus-compatible backend can pull metrics directly.
+
+**dnsdave-dns** (`:9090/metrics`):
 
 | Metric | Type | Labels |
 |--------|------|--------|
@@ -1615,8 +1622,10 @@ Pi 4 (2 GB+) can run the full stack comfortably, including `dnsdave-log`, `dnsda
 | `dnsdave_dns_cache_hits_total` | Counter | — |
 | `dnsdave_dns_bloom_false_positives_total` | Counter | — |
 | `dnsdave_dns_nats_publish_errors_total` | Counter | — |
+| `dnsdave_dns_forward_zone_hits_total` | Counter | `zone` |
+| `dnsdave_dns_dnssec_validation_failures_total` | Counter | — |
 
-**dnsdave-dhcp:**
+**dnsdave-dhcp** (`:9093/metrics`):
 
 | Metric | Type | Labels |
 |--------|------|--------|
@@ -1627,7 +1636,7 @@ Pi 4 (2 GB+) can run the full stack comfortably, including `dnsdave-log`, `dnsda
 | `dnsdave_dhcp_nak_total` | Counter | `scope_id`, `reason` |
 | `dnsdave_dhcp_dynamic_dns_registrations_total` | Counter | `scope_id` |
 
-**dnsdave-sync:**
+**dnsdave-sync** (`:9091/metrics`):
 
 | Metric | Type | Labels |
 |--------|------|--------|
@@ -1639,7 +1648,28 @@ NATS: built-in monitoring endpoint on `:8222/metrics` via `nats-surveyor`.
 
 ### 12.2 Structured Logging
 
-All containers emit JSON logs. Correlate across containers using a `trace_id` embedded in NATS event payloads — present in both query log entries and DHCP lease events.
+All containers write **RFC 5424-compatible structured JSON** to stdout. Every log line includes:
+
+```json
+{
+  "ts":        "2026-04-04T14:23:01.842Z",
+  "level":     "info",
+  "container": "dnsdave-dns",
+  "node_id":   "dns-node-1",
+  "trace_id":  "a1b2c3d4e5f6",
+  "msg":       "query processed",
+  "domain":    "example.com",
+  "qtype":     "A",
+  "result":    "upstream",
+  "latency_us": 12
+}
+```
+
+`trace_id` is propagated through NATS event payloads, allowing correlation of a single DNS query across `dnsdave-dns` → NATS → `dnsdave-log` → `dnsdave-export` → external system.
+
+The container runtime's logging driver handles routing stdout to external collectors:
+- **Docker**: `--log-driver=json-file` (default) / `fluentd` / `gelf` / `splunk`
+- **Kubernetes**: stdout → node logging agent (Fluent Bit, Logstash, etc.)
 
 ### 12.3 Live Streams
 
@@ -1647,6 +1677,7 @@ All containers emit JSON logs. Correlate across containers using a `trace_id` em
 |--------|----------|--------|
 | DNS query log | `GET /api/v1/logs/stream` (SSE) | `dnsdave.query.*` NATS |
 | DHCP lease events | `GET /api/v1/dhcp/leases/stream` (SSE) | `dnsdave.dhcp.lease.*` NATS |
+| System events | `GET /api/v1/system/events/stream` (SSE) | `dnsdave.zone.*`, `dnsdave.dnssec.*`, `dnsdave.config.*` |
 
 ### 12.4 Health & Readiness
 
@@ -1657,7 +1688,362 @@ All containers emit JSON logs. Correlate across containers using a `trace_id` em
 | `dnsdave-api` | `:8080/api/v1/system/health` | NATS + Postgres connected |
 | `dnsdave-sync` | `:9091/health` | NATS + Postgres connected |
 | `dnsdave-log` | `:9092/health` | NATS + Postgres connected |
+| `dnsdave-export` | `:9094/health` | NATS connected, ≥1 backend reachable |
 | `nats` | `:8222/healthz` | Built-in |
+
+### 12.5 Export Architecture — `dnsdave-export`
+
+`dnsdave-export` is an **optional, stateless** container that subscribes to all NATS event subjects and forwards events to one or more configured backends. It is the single seam between DNSDave's internal event bus and any external observability system.
+
+**Design principle:** `dnsdave-export` never touches the database. All data it exports comes from NATS. Adding a new export destination requires only a new backend configuration block — zero changes to any other container.
+
+```mermaid
+flowchart LR
+    NATS["NATS JetStream\ndnsdave.query.*\ndnsdave.dhcp.lease.*\ndnsdave.zone.*\ndnsdave.config.*\ndnsdave.dnssec.*"]
+
+    NATS --> EXP["dnsdave-export\n(fan-out)"]
+
+    EXP --> SYS["Syslog UDP/TCP\n→ rsyslog / syslog-ng"]
+    EXP --> OTLP["OTLP gRPC/HTTP\n→ OpenTelemetry Collector"]
+    EXP --> LOKI["Loki push API\n→ Grafana"]
+    EXP --> INFL["InfluxDB line protocol"]
+    EXP --> STAT["StatsD UDP\n→ Graphite / Telegraf"]
+    EXP --> ES["Elasticsearch bulk API\n→ Kibana / Logstash"]
+    EXP --> SPLUNK["Splunk HEC"]
+    EXP --> HOOK["HTTP webhook\n(generic JSON)"]
+
+    OTLP --> OC["OTel Collector\n(fan-out again)"]
+    OC --> PROM["Prometheus\n→ Grafana dashboards"]
+    OC --> LOKI2["Loki logs\n→ Grafana Explore"]
+    OC --> TEMPO["Tempo traces\n→ Grafana Explore"]
+    OC --> DD["Datadog"]
+    OC --> NR["New Relic"]
+    OC --> HON["Honeycomb"]
+```
+
+**Event types exported:**
+
+| NATS subject | Export payload | Typical destination |
+|-------------|---------------|-------------------|
+| `dnsdave.query.*` | DNS query log entry (domain, client, type, result, latency) | Loki / Elasticsearch / Splunk / syslog |
+| `dnsdave.dhcp.lease.*` | Lease assignment / release / expiry | Loki / InfluxDB / syslog |
+| `dnsdave.zone.*` | Zone serial change, record add/delete | syslog / Elasticsearch |
+| `dnsdave.dnssec.*` | Key lifecycle, signing events | syslog / SIEM |
+| `dnsdave.config.*` | Config mutations (who changed what) | SIEM / syslog / Elasticsearch |
+| `dnsdave.blocklist.*` | Sync completions, domain count changes | InfluxDB / Prometheus pushgateway |
+
+### 12.6 Backend Configuration
+
+`dnsdave-export` is configured via `DNSDAVE_EXPORT_CONFIG` (path to a TOML/YAML file) or environment variables. Multiple backends can be active simultaneously.
+
+```toml
+# export.toml — example: syslog + Loki + InfluxDB all at once
+
+[backends.syslog]
+enabled  = true
+protocol = "udp"           # "udp" | "tcp" | "tls"
+address  = "192.168.1.5:514"
+format   = "rfc5424"       # "rfc5424" | "rfc3164" | "cef"
+facility = "local0"
+events   = ["query", "dhcp", "config", "zone", "dnssec"]
+
+[backends.loki]
+enabled  = true
+url      = "http://loki:3100/loki/api/v1/push"
+labels   = { app = "dnsdave", env = "home" }
+batch_size = 100
+batch_wait_ms = 500
+events   = ["query", "dhcp"]
+
+[backends.influxdb]
+enabled       = true
+url           = "http://influxdb:8086"
+token         = "${INFLUXDB_TOKEN}"
+org           = "home"
+bucket        = "dnsdave"
+protocol      = "line"     # InfluxDB line protocol over HTTP
+events        = ["query", "dhcp"]   # writes as time-series measurements
+
+[backends.otlp]
+enabled   = true
+endpoint  = "http://otel-collector:4317"   # gRPC
+protocol  = "grpc"         # "grpc" | "http"
+events    = ["query", "dhcp", "zone", "dnssec", "config"]
+
+[backends.webhook]
+enabled    = true
+url        = "https://my-siem.example.com/api/events"
+method     = "POST"
+headers    = { "Authorization" = "Bearer ${SIEM_TOKEN}" }
+format     = "json"        # "json" | "ndjson" | "cef"
+batch_size = 50
+events     = ["config", "dnssec"]  # config changes + key events only
+
+[backends.statsd]
+enabled  = true
+address  = "telegraf:8125"
+protocol = "udp"
+prefix   = "dnsdave"
+# Metrics only — emits counters and gauges from query/dhcp events
+```
+
+### 12.7 Supported Destinations
+
+#### rsyslog / syslog-ng
+
+DNSDave events are forwarded as **RFC 5424** structured syslog messages over UDP or TCP. Structured data elements carry the DNSDave-specific fields (domain, client, result, etc.).
+
+```
+<134>1 2026-04-04T14:23:01.842Z dns-node-1 dnsdave - query [dnsdave@12345
+    domain="example.com" qtype="A" result="upstream" client="192.168.1.50"
+    latency_us="12"] query processed
+```
+
+**rsyslog receiver config:**
+```
+# /etc/rsyslog.d/dnsdave.conf
+module(load="imudp")
+input(type="imudp" port="514")
+
+template(name="dnsdaveJSON" type="string"
+  string="%rawmsg%\n")
+
+if $programname == 'dnsdave' then {
+  action(type="omfile" file="/var/log/dnsdave/events.log"
+    template="dnsdaveJSON")
+  stop
+}
+```
+
+**CEF format** (for SIEM compatibility — ArcSight, QRadar) is also supported by setting `format = "cef"`:
+```
+CEF:0|DNSDave|dnsdave-dns|0.1|DNS_QUERY|DNS Query Processed|3|
+  src=192.168.1.50 dhost=example.com cat=allowed rt=1712238181842
+```
+
+#### Logstash (ELK Stack)
+
+Two integration paths:
+
+**Path 1 — Docker log driver → Logstash** (simplest, no `dnsdave-export` needed):
+```yaml
+# docker-compose.yml
+services:
+  dnsdave-dns:
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://logstash:12201"
+        tag: "dnsdave-dns"
+```
+
+**Path 2 — `dnsdave-export` → Elasticsearch bulk API** (richer, structured):
+```toml
+[backends.elasticsearch]
+enabled  = true
+url      = "http://elasticsearch:9200"
+index    = "dnsdave-{yyyy.MM.dd}"
+username = "dnsdave"
+password = "${ES_PASSWORD}"
+events   = ["query", "dhcp", "zone", "config"]
+```
+
+Kibana dashboards: a pre-built `kibana-dashboards.ndjson` export is shipped in the `deploy/kibana/` directory covering query volume, block rate, top clients, DHCP lease map, and zone change audit log.
+
+#### Grafana (Loki + Prometheus + Tempo)
+
+Grafana is the recommended full-stack observability destination:
+
+| Grafana component | DNSDave source | Integration |
+|------------------|---------------|-------------|
+| **Prometheus** (metrics) | `/metrics` scrape endpoints on all containers | Prometheus scrapes → Grafana datasource |
+| **Loki** (logs/events) | `dnsdave-export` → Loki push API | Direct HTTP push, or OTel Collector |
+| **Tempo** (traces) | `dnsdave-export` → OTLP | OTel Collector → Tempo |
+
+Pre-built Grafana dashboards are shipped in `deploy/grafana/dashboards/`:
+- `dns-overview.json` — QPS, block rate, cache hit ratio, p99 latency
+- `dhcp-leases.json` — pool utilisation gauges, lease events, active count
+- `dns-query-explorer.json` — Loki-powered query log with client and domain filters
+- `cluster-health.json` — per-node QPS sparklines, NATS health, Postgres lag
+- `blocklist-sync.json` — list sizes over time, sync durations, error rates
+- `dnssec-keys.json` — key expiry countdown, signing events
+
+**Docker Compose with full Grafana stack:**
+```yaml
+# docker-compose.grafana.yml (include alongside docker-compose.yml)
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports: ["9090:9090"]
+
+  loki:
+    image: grafana/loki:latest
+    ports: ["3100:3100"]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3001:3000"]
+    environment:
+      GF_DATASOURCE_PROMETHEUS_URL: "http://prometheus:9090"
+      GF_DATASOURCE_LOKI_URL: "http://loki:3100"
+    volumes:
+      - ./deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./deploy/grafana/datasources:/etc/grafana/provisioning/datasources
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      - ./deploy/otel/collector.yaml:/etc/otelcol/config.yaml
+    ports: ["4317:4317", "4318:4318"]
+
+  dnsdave-export:
+    image: ghcr.io/dnsdave/dnsdave-export:latest
+    environment:
+      DNSDAVE_NATS_URL: "nats://nats:4222"
+      DNSDAVE_EXPORT_CONFIG: "/config/export.toml"
+    volumes:
+      - ./deploy/export/grafana.toml:/config/export.toml
+```
+
+#### OpenTelemetry Collector
+
+The OTel Collector is the **recommended universal adapter** when exporting to more than one backend, or when the destination is not directly supported by `dnsdave-export`. `dnsdave-export` sends OTLP (gRPC or HTTP) to the collector, which handles fan-out.
+
+```yaml
+# deploy/otel/collector.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:  { endpoint: "0.0.0.0:4317" }
+      http:  { endpoint: "0.0.0.0:4318" }
+
+processors:
+  batch:
+    timeout: 1s
+  resource:
+    attributes:
+      - { action: insert, key: "service.name", value: "dnsdave" }
+
+exporters:
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+  loki:
+    endpoint: "http://loki:3100/loki/api/v1/push"
+  otlp/tempo:
+    endpoint: "http://tempo:4317"
+  datadog:
+    api:
+      key: "${DD_API_KEY}"
+  splunk_hec:
+    token: "${SPLUNK_HEC_TOKEN}"
+    endpoint: "https://splunk:8088/services/collector"
+  elasticsearch:
+    endpoints: ["http://elasticsearch:9200"]
+    index: "dnsdave"
+
+service:
+  pipelines:
+    logs:
+      receivers:  [otlp]
+      processors: [batch, resource]
+      exporters:  [loki, elasticsearch]
+    metrics:
+      receivers:  [otlp]
+      processors: [batch]
+      exporters:  [prometheus, datadog]
+    traces:
+      receivers:  [otlp]
+      processors: [batch]
+      exporters:  [otlp/tempo]
+```
+
+#### InfluxDB
+
+`dnsdave-export` translates query and DHCP events into InfluxDB **line protocol** measurements, enabling time-series analysis in InfluxDB 2.x and dashboards in Grafana (using the InfluxDB datasource) or Chronograf.
+
+```
+# Line protocol examples
+dns_query,host=dns-node-1,result=upstream,qtype=A,client_group=default latency_us=12i 1712238181842000000
+dns_query,host=dns-node-1,result=blocked,qtype=A,client_group=iot latency_us=0i 1712238181900000000
+dhcp_lease,scope=lan,event=assigned ip="192.168.1.50",hostname="mylaptop",mac="aa:bb:cc:dd:ee:ff" 1712238182000000000
+```
+
+#### Splunk
+
+`dnsdave-export` sends events to the **Splunk HTTP Event Collector (HEC)**. Events are formatted as Splunk JSON events with a `sourcetype` of `dnsdave:query`, `dnsdave:dhcp`, or `dnsdave:audit`.
+
+Pre-built Splunk apps (Technology Add-On + Dashboard) will be shipped in `deploy/splunk/` covering the same dashboard set as Grafana.
+
+#### Datadog, New Relic, Honeycomb, and others
+
+These are best reached via the **OTel Collector** path: `dnsdave-export → OTLP → otel-collector → {datadog / newrelic / honeycomb}` exporter. All major vendors now publish OTel Collector exporter plugins. No custom code in DNSDave is required.
+
+#### StatsD / Graphite / Telegraf
+
+`dnsdave-export` emits StatsD-format counters and gauges over UDP. This is the integration path for:
+- **Graphite** (via StatsD relay)
+- **Telegraf** (StatsD input plugin) → any Telegraf output (InfluxDB, Prometheus, etc.)
+- **AWS CloudWatch** (via `cloudwatch-agent`)
+
+#### Generic HTTP Webhook
+
+A configurable HTTP POST backend for any system not covered above (PagerDuty, OpsGenie, custom SIEM, home automation, etc.). Payload can be formatted as JSON, NDJSON, or CEF. Supports batching, retry with exponential back-off, and per-event-type filtering.
+
+### 12.8 Event Schema (Exported Payloads)
+
+All backends receive a normalised event envelope regardless of the wire format:
+
+```rust
+struct ExportEvent {
+    ts:          DateTime<Utc>,
+    event_type:  EventType,       // Query | DhcpLease | ZoneChange | Config | Dnssec
+    node_id:     String,
+    trace_id:    String,
+    payload:     EventPayload,    // type-specific fields
+}
+
+enum EventPayload {
+    Query {
+        client_ip:    IpAddr,
+        client_group: String,
+        domain:       String,
+        qtype:        String,
+        result:       QueryResult,  // Allowed | Blocked | Cached | Local | Forward
+        source:       String,       // upstream name, forward zone, "blocklist", etc.
+        latency_us:   u64,
+        dnssec_ad:    bool,
+    },
+    DhcpLease {
+        event:    LeaseEvent,  // Assigned | Renewed | Released | Expired
+        scope_id: String,
+        mac:      [u8; 6],
+        ip:       IpAddr,
+        hostname: String,
+        duration_s: u32,
+    },
+    ZoneChange {
+        zone:   String,
+        serial: u64,
+        action: String,  // "record_added" | "record_deleted" | "serial_bumped"
+        name:   String,
+        rtype:  String,
+    },
+    Config {
+        action:   String,  // "created" | "updated" | "deleted"
+        resource: String,  // "dns_record" | "zone" | "forward_zone" | ...
+        id:       String,
+        actor:    String,  // API key ID that made the change
+    },
+    Dnssec {
+        zone:     String,
+        key_type: String,  // "ksk" | "zsk"
+        action:   String,  // "generated" | "rolled" | "retired"
+        key_tag:  u16,
+    },
+}
+```
 
 ---
 
@@ -1682,6 +2068,7 @@ NATS per-container permissions:
 - `dnsdave-dns`: publish `dnsdave.query.*`; subscribe `dnsdave.config.>`, `dnsdave.blocklist.>`, `dnsdave.dhcp.lease.>`, `dnsdave.zone.>`, `dnsdave.dnssec.>`
 - `dnsdave-dhcp`: publish `dnsdave.dhcp.lease.*`; subscribe `dnsdave.config.>`; no publish on config subjects
 - `dnsdave-api`: publish `dnsdave.config.*`, `dnsdave.zone.*`, `dnsdave.dnssec.*`; no publish on query or lease subjects
+- `dnsdave-export`: subscribe `dnsdave.query.*`, `dnsdave.dhcp.lease.*`, `dnsdave.zone.*`, `dnsdave.config.*`, `dnsdave.dnssec.*`, `dnsdave.blocklist.*`; publish nothing; no Postgres access; deny-all on any publish subject
 
 ### 13.1 Certificate Management
 
@@ -1836,7 +2223,23 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] ZSK pre-publish rollover (automated via NATS KV key lifecycle)
 - [ ] `dnsdave.dnssec.*` NATS events; `DNSDAVE_DNSSEC` JetStream stream
 
-### v0.5 — DHCP
+### v0.5 — Observability export
+
+- [ ] `dnsdave-export` container: NATS subscriber, fan-out to configured backends
+- [ ] Syslog backend (RFC 5424 + RFC 3164 + CEF) over UDP and TCP; rsyslog/syslog-ng compatible
+- [ ] Loki push API backend (batched HTTP)
+- [ ] OTLP backend (gRPC + HTTP) for OpenTelemetry Collector
+- [ ] InfluxDB line protocol backend (HTTP write API)
+- [ ] StatsD UDP backend (counters/gauges for query and DHCP events)
+- [ ] Elasticsearch bulk API backend
+- [ ] Splunk HEC backend
+- [ ] Generic HTTP webhook backend (JSON, NDJSON, CEF)
+- [ ] Pre-built Grafana dashboards in `deploy/grafana/dashboards/`
+- [ ] Pre-built Kibana dashboards in `deploy/kibana/`
+- [ ] Reference `docker-compose.grafana.yml` with Prometheus + Loki + Grafana + OTel Collector
+- [ ] `dnsdave-export` multi-arch container image (same targets as other containers)
+
+### v0.6 — DHCP
 - [ ] `dnsdave-dhcp`: DHCPv4 DORA state machine, scope management, static reservations
 - [ ] Full DHCPv4 option suite (codes 1–252; raw hex for custom codes)
 - [ ] Client class matching + vendor-specific option delivery
@@ -1876,6 +2279,7 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 | `dnsdave-sync` | **Rust** | `tokio`, `async-nats`, `sqlx`, `reqwest`, `memchr`, `boomphf`, `bloomfilter` |
 | `dnsdave-log` | **Rust** | `async-nats`, `sqlx`, `tokio` |
 | `dnsdave-stats` | **Rust** | `async-nats`, `tokio`, `dashmap` |
+| `dnsdave-export` | **Rust** | `async-nats`, `tokio`, `opentelemetry`, `opentelemetry-otlp`, `tonic` (gRPC), `reqwest`, `serde_json`, `serde`, `toml` (config), `bytes` (line protocol), `tracing` |
 
 ### 15.2 Infrastructure
 
@@ -1943,3 +2347,6 @@ All containers are Rust for consistency. `dhcproto` covers DHCPv4 and DHCPv6 wit
 17. **Local CA vs external CA for private deployments** — For home labs with no public NS delegation, the ACME DNS-01 flow requires a private ACME CA (Step CA, Vault PKI, etc.). Should DNSDave ship with an embedded minimal ACME CA, or document how to integrate with an external one? Shipping one adds significant scope but removes a dependency.
 18. **Certificate SAN coverage** — DoT/DoH clients validate the server certificate hostname. In multi-node deployments (multiple `dnsdave-dns` instances), each node needs a cert that covers its individual hostname AND the shared DNS service name. Should certs use a wildcard SAN, or per-node issuance?
 19. **ACME DNS-01 for split-horizon zones** — If the zone exists only locally (no public NS delegation), Let's Encrypt cannot validate DNS-01 challenges. Should DNSDave detect this case and warn the operator, or automatically fall back to self-signed?
+20. **`dnsdave-export` back-pressure** — If a backend (e.g., Logstash, remote Loki) is slow or down, NATS JetStream consumer ACK delay will build up. Should `dnsdave-export` use a bounded in-memory queue per backend with drop-oldest semantics, or block ACK and let JetStream naturally slow the consumer? The latter risks head-of-line blocking for other subjects on the same consumer.
+21. **Export schema versioning** — As new event types or fields are added, how should backward compatibility be maintained for external consumers that have dashboards or parser rules built against the schema? Versioned `event_schema_version` field in every envelope, with a compatibility matrix doc?
+22. **Syslog TLS (RELP/RFC 5425)** — For production deployments where syslog traffic must be encrypted (PCI-DSS, HIPAA). `dnsdave-export` should support TLS-wrapped TCP syslog (RFC 5425) and optionally RELP. Is this in scope for v0.5 or a follow-up?

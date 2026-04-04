@@ -72,6 +72,7 @@ See [`COMPARISON.md`](COMPARISON.md) for a full comparison against Pi-hole, AdGu
 - **`SO_REUSEPORT` + `recvmmsg`/`sendmmsg`** — one Tokio task per CPU core, batch UDP I/O
 - **Lock-free ArcSwap structures** — blocklist, zone trie, forward zone table, and allowlist all hot-swap via atomic pointer swap with no query-path locking
 - **GC-free** — written in Rust; no garbage collector pauses on the hot path
+- **Pluggable observability export** — `dnsdave-export` subscribes to NATS and pushes events to any external system: syslog (rsyslog), Grafana Loki, ELK / Logstash, Splunk, InfluxDB, StatsD, Datadog, or generic HTTP webhook — zero changes to existing containers required
 
 ---
 
@@ -240,7 +241,7 @@ DNSDave is scoped deliberately. It does not:
 | Database | **PostgreSQL** (prod) · **SQLite** (minimal/dev) |
 | Web UI | **SvelteKit 2** + **Tailwind CSS v4** + **shadcn-svelte** |
 | Containers | **distroless/cc** base; multi-arch via `cross` + `docker buildx` |
-| Observability | **Prometheus** metrics · structured JSON logs · SSE live streams |
+| Observability | **Prometheus** metrics · structured JSON logs · SSE live streams · pluggable export (`dnsdave-export`) → rsyslog · Grafana / Loki · ELK · Splunk · InfluxDB · StatsD · OTLP · Datadog · HTTP webhook |
 
 ---
 

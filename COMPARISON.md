@@ -276,7 +276,7 @@ This document compares DNSDave against Pi-hole, major open-source DNS/DHCP tools
 
 | Factor | DNSDave | Pi-hole | AdGuard | Technitium | dnsmasq | CoreDNS | BIND9 | PowerDNS | Infoblox |
 |--------|---------|---------|---------|------------|---------|---------|-------|----------|----------|
-| License | OSS (TBD) | EUPL-1.2 | GPL-3.0 | GPL-3.0 | GPL-2.0 | Apache-2.0 | MPL-2.0 | GPL-2.0 | Proprietary |
+| License | **AGPL-3.0** | EUPL-1.2 | GPL-3.0 | GPL-3.0 | GPL-2.0 | Apache-2.0 | MPL-2.0 | GPL-2.0 | Proprietary |
 | Self-hosted | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | SaaS / cloud | ❌ | ❌ | ✅ | ❌ | — | — | — | — | ✅ |
 | Commercial support | 🔮 | ❌ | ✅ | ❌ | ❌ | ✅ (CNCF) | ✅ (ISC) | ✅ | ✅ |

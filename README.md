@@ -3,7 +3,7 @@
 > **Status: Design complete — implementation in progress.**  
 > All architecture, APIs, and tests are fully specified. Code is not yet written.
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-linux%2Famd64%20%7C%20linux%2Farm64%20%7C%20linux%2Farm%2Fv7%20%7C%20macOS-lightgrey)](#platform-support)
 [![Language: Rust](https://img.shields.io/badge/language-Rust-orange)](https://www.rust-lang.org)
 [![UI: SvelteKit](https://img.shields.io/badge/UI-SvelteKit-red)](UI.md)
@@ -255,4 +255,6 @@ To discuss the design, open an [issue](https://github.com/my0373/dnsdave/issues)
 
 ## License
 
-DNSDave is released under the [GNU General Public License v3.0](LICENSE).
+DNSDave is released under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+
+Because DNSDave is a network service, AGPL-3.0 ensures that anyone running a modified version as a service must make their source changes available — closing the "SaaS loophole" that standard GPL-3.0 leaves open. All dependencies are MIT or Apache 2.0 licensed and are fully compatible with AGPL-3.0.

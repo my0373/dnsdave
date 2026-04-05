@@ -157,6 +157,9 @@ All icons from **Lucide** unless noted. Key mappings:
 | Analytics | `BarChart3` |
 | Cluster | `Server` |
 | Settings | `Settings2` |
+| NetBox integration | `Box` (NetBox logo approximation) |
+| NetBox synced | `RefreshCw` |
+| NetBox conflict | `AlertCircle` |
 | Live / SSE active | `RadioTower` (pulsing) |
 | Healthy | `CheckCircle2` |
 | Warning | `AlertTriangle` |
@@ -238,16 +241,21 @@ Sections and items:
     Cluster
     Event Bus
     Settings
+
+  ○ INTEGRATIONS
+    NetBox          ✅ synced  (or ⚠ 2 conflicts / ❌ error)
 ```
 
 - Section headers are non-clickable separators.
 - Active item highlighted with `--dns` left border + faint background tint.
 - `● live` badge pulses (2s animation) when SSE stream is connected.
+- The `NetBox` sidebar item shows an inline status indicator: a green dot when healthy, an amber dot with conflict count when unresolved conflicts exist, or a red dot on error. Hovering shows a tooltip with last sync time.
 - Collapse button at bottom toggles icon-only mode; state persisted in `localStorage`.
 - **System status footer** (bottom of sidebar, always visible):
   - NATS: `● Connected` / `● Degraded` / `● Down`
   - Postgres: `● Connected` / `● Error`
   - Cert expiry: `● 87 days` / `⚠ 12 days` / `✗ Expired`
+  - NetBox: `● Synced` / `⚠ Conflicts` / `● Not configured` (if disabled)
 
 ### 5.3 Top Bar
 
@@ -994,6 +1002,297 @@ Tab layout: `General | API Keys | Upstreams | NATS | Notifications | Danger Zone
 
 ---
 
+### 6.13 NetBox Integration
+
+**Purpose:** First-class bidirectional integration with NetBox 4.5+. Configure push and pull behaviour, manage API credentials, map NetBox organisational objects to DNSDave objects, and monitor sync activity — all from a single page.
+
+**Navigation:** `Settings → Integrations → NetBox` (also reachable via the global Command Palette as "NetBox Integration").
+
+**Layout – tabbed panel page:**
+
+```
+┌─ NetBox Integration ──────────────────────── [● Connected] [Test] ─┐
+│                                                                      │
+│  [Connection] [Push] [Pull] [Mappings] [Activity]                   │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### Tab 1 – Connection
+
+```
+┌─ Connection ─────────────────────────────────────────────────────────┐
+│                                                                       │
+│  NetBox URL    [https://netbox.example.com              ]  [Test]    │
+│                                                                       │
+│  API Token     [••••••••••••••••••••••••••••  8f3a]  [Show] [⟳]    │
+│                ↳ Last rotated: 12 days ago                           │
+│                                                                       │
+│  Mode          ● REST API (direct)                                   │
+│                ○ Diode (gRPC – recommended for high-volume push)     │
+│                                                                       │
+│  Diode URL     [grpc://diode-server:8080        ]  (shown if Diode) │
+│  Diode Key     [••••••••••••  9c2d]  [Show] [⟳]                    │
+│                                                                       │
+│  ┌─ Connection Status ─────────────────────────────────────────────┐ │
+│  │  ✅ Connected to NetBox 4.5.2  ·  Response: 3 ms               │ │
+│  │  Authenticated as: dnsdave-svc  ·  Permissions: read + write   │ │
+│  │  Diode: ✅ Connected  ·  Queue depth: 0                        │ │
+│  └──────────────────────────────────────────────────────────────── │
+│                                                                       │
+│  Webhook Secret   [•••••••••••••••  ] [Show] [⟳ Regenerate]        │
+│  Webhook URL      https://dnsdave:8080/api/v1/integrations/netbox/  │
+│                   webhook                              [📋 Copy]    │
+│                                                                       │
+│  [Save Connection]                                                    │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+**Behaviour:**
+- `[Test]` fires `POST /api/v1/integrations/netbox/test` and displays the result inline: NetBox version, response latency, authenticated user, and permission check (must have IPAM read/write and DCIM read).
+- Token and keys are stored AES-GCM encrypted in Postgres; the UI displays only the last 4 characters.
+- `[⟳]` (rotate) opens a confirmation modal; the old token is invalidated only after the new one is saved and tested successfully.
+- Webhook URL: display only (generated from the DNSDave API base URL). A `[📋 Copy]` button copies it to clipboard. Alongside it, a `[📜 Generate NetBox Script]` button downloads a Python script that, when run against the connected NetBox instance, creates all required event rules automatically.
+- Mode toggle: switching from REST to Diode shows the Diode URL and key fields with a smooth CSS transition.
+
+---
+
+#### Tab 2 – Push (DNSDave → NetBox)
+
+```
+┌─ Push ────────────────────────────────────────────────────────────────┐
+│                                                                        │
+│  ☑ Enable push                                                        │
+│                                                                        │
+│  ┌─ What to push ──────────────────────────────────────────────────┐  │
+│  │  ☑  Prefixes          DHCP scopes → NetBox Prefixes             │  │
+│  │  ☑  IP Ranges         DHCP pool bounds → NetBox IP Ranges       │  │
+│  │  ☑  IP Addresses      DHCP leases → NetBox IP Addresses         │  │
+│  │  ☑  DNS names         DNS A/AAAA records → IP Address dns_name  │  │
+│  │  ☐  Devices           Auto-create Device records for new leases  │  │
+│  │       └── Max auto-create per hour: [10     ]                   │  │
+│  │           Dry-run mode:  ☑ (log what would be created)          │  │
+│  │           MAC prefix allowlist: [aa:bb:cc, 11:22:33   ]         │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  ┌─ Conflict strategy ────────────────────────────────────────────┐   │
+│  │  When a NetBox object already exists:                           │   │
+│  │  ● Overwrite   DNSDave data always wins                        │   │
+│  │  ○ Skip        Leave NetBox unchanged                           │   │
+│  │  ○ Tag         Add "dnsdave-conflict" tag and alert             │   │
+│  │  ○ Merge       Fill only empty NetBox fields                    │   │
+│  └──────────────────────────────────────────────────────────────── │   │
+│                                                                        │
+│  ┌─ Lifecycle ────────────────────────────────────────────────────┐   │
+│  │  On lease expiry:    [Free (status → available)  ▼]            │   │
+│  │  On lease release:   [Free (status → available)  ▼]            │   │
+│  │  On scope deleted:   [Keep (Prefix status → container) ▼]      │   │
+│  └────────────────────────────────────────────────────────────────┘   │
+│                                                                        │
+│  ┌─ Context ──────────────────────────────────────────────────────┐   │
+│  │  Default VRF:     [              ▼]  (blank = Global Table)    │   │
+│  │  Default Site:    [              ▼]                             │   │
+│  │  Default Tenant:  [              ▼]                             │   │
+│  │  Tags applied:    [dnsdave            ×] [+ Add tag]            │   │
+│  └────────────────────────────────────────────────────────────────┘   │
+│                                                                        │
+│  ┌─ Push Status ──────────────────────────────────────────────────┐   │
+│  │  Last push:  2 minutes ago                                      │   │
+│  │  Objects:    Prefixes 12  IP Ranges 12  Addresses 847  DNS 412  │   │
+│  │  Errors:     0    Conflicts: 0    Skipped: 3                    │   │
+│  └────────────────────────────────────────────────────────────────┘   │
+│                                                                        │
+│  [Save Push Config]              [▶ Push Now]   [☐ Dry-run ▼]        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Behaviour:**
+- `[▶ Push Now]` fires `POST /api/v1/integrations/netbox/sync/push` and switches to the Activity tab, which streams live progress via SSE.
+- Dry-run mode can be set for a single run (`[☐ Dry-run ▼]` dropdown: "Once" or "Always") or toggled globally. When dry-run is active, a yellow `DRY RUN` badge appears in the tab header.
+- Lifecycle dropdowns: "Free" (status → available), "Remove" (delete the IP Address from NetBox), "Keep" (do nothing). A warning tooltip on "Remove" explains this is irreversible.
+- Device auto-creation: collapsing sub-section that expands when the "Devices" checkbox is ticked. Max per-hour cap and MAC allowlist guard-rail inputs appear inside it.
+
+---
+
+#### Tab 3 – Pull (NetBox → DNSDave)
+
+```
+┌─ Pull ─────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│  ☑ Enable pull                                                         │
+│                                                                         │
+│  Pull mode:                                                             │
+│  ● Webhook     NetBox sends events to DNSDave instantly                │
+│  ○ Scheduled   Poll NetBox every [15   ] minutes                       │
+│  ○ Manual      Only when triggered from this page                      │
+│                                                                         │
+│  ┌─ What to pull ──────────────────────────────────────────────────┐   │
+│  │  ☑  Prefixes             NetBox Prefixes  → DHCP scopes         │   │
+│  │  ☑  IP Ranges            NetBox IP Ranges → DHCP pool bounds    │   │
+│  │  ☑  IP Addresses         NetBox IPs       → DNS records         │   │
+│  │  ☑  Devices              Devices + IPs    → DNS A + PTR records │   │
+│  │  ☑  Virtual Machines     VMs + IPs        → DNS A + PTR records │   │
+│  │  ☑  Static Reservations  IPs with MAC CF  → DHCP reservations  │   │
+│  │                                                                  │   │
+│  │  Auto-create DNS zones for unknown domains:  ○ Yes  ● No        │   │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─ Filters ──────────────────────────────────────────────────────┐    │
+│  │  Only pull objects tagged:    [dnsdave            ×] [+ tag]   │    │
+│  │  Filter by site:              [All sites           ▼]          │    │
+│  │  Filter by VRF:               [All VRFs            ▼]          │    │
+│  │  Filter by tenant:            [All tenants         ▼]          │    │
+│  └──────────────────────────────────────────────────────────────── │    │
+│                                                                         │
+│  ┌─ Conflict strategy ─────────────────────────────────────────────┐   │
+│  │  When a DNSDave object already exists:                          │   │
+│  │  ● Skip        Leave DNSDave unchanged (safest default)         │   │
+│  │  ○ Overwrite   NetBox data wins                                 │   │
+│  │  ○ Merge       Fill only empty DNSDave fields                   │   │
+│  │  ○ Tag         Mark conflict; queue for manual review           │   │
+│  │  ○ Ask         Open a conflict resolution dialog per object     │   │
+│  └──────────────────────────────────────────────────────────────── │   │
+│                                                                         │
+│  ┌─ Device FQDN template ──────────────────────────────────────────┐   │
+│  │  Template:  [{name}.{site}.{default_zone}          ]           │   │
+│  │  Preview:   router-01.london.corp.example.com                   │   │
+│  │  Variables: {name} {site} {tenant} {role} {default_zone}       │   │
+│  └──────────────────────────────────────────────────────────────── │   │
+│                                                                         │
+│  ┌─ Pull Status ──────────────────────────────────────────────────┐    │
+│  │  Last pull:     14 minutes ago  (next in 1 min)                 │    │
+│  │  Last webhook:  32 seconds ago  (2 events received)             │    │
+│  │  Pulled:        Prefixes 8   IPs 241   Devices 34   VMs 12      │    │
+│  │  Pending:       0    Conflicts: 2    Errors: 0                   │    │
+│  └──────────────────────────────────────────────────────────────── │    │
+│                                                                         │
+│  [Save Pull Config]  [▶ Pull Now]  [🔍 Preview Pull]  [☐ Dry-run ▼]  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Behaviour:**
+- `[🔍 Preview Pull]` fires `GET /api/v1/integrations/netbox/sync/preview` and opens a modal showing a diff table: "Would create N, update M, delete K, conflicts P" with expandable row detail for each action.
+- Preview modal has a `[▶ Apply]` button to execute the pull immediately from within the modal.
+- Webhook mode: when selected, a status indicator shows the last received event and how many events have been processed in the last hour.
+- FQDN template live preview: the preview line updates as the user types, using the first device returned by the NetBox API as a sample object.
+- Conflict count badge: a red badge on the tab header `Pull ②` appears when there are unresolved conflicts. Clicking it filters the Activity tab to conflicts only.
+
+---
+
+#### Tab 4 – Mappings
+
+```
+┌─ Mappings ──────────────────────────────────────────────────────────────┐
+│  Map NetBox organisational objects to DNSDave objects.                   │
+│                                                                          │
+│  [VRF → Scope] [Site → Zone] [Tenant → Client Group] [Tag → Filter]     │
+│                                                                          │
+│  ── VRF → DHCP Scope ─────────────────────────────────────────────────  │
+│  NetBox VRF                    DNSDave DHCP Scope                        │
+│  [corporate           ▼]  →   [Office LAN (scope_office)  ▼]  [× Del]  │
+│  [iot-network         ▼]  →   [IoT Segment (scope_iot)    ▼]  [× Del]  │
+│  [+ Add VRF mapping]                                                     │
+│                                                                          │
+│  ── Site → DNS Zone Suffix ───────────────────────────────────────────  │
+│  NetBox Site                   DNSDave Zone                              │
+│  [london              ▼]  →   [london.corp.example  ▼]  [× Del]        │
+│  [new-york            ▼]  →   [ny.corp.example      ▼]  [× Del]        │
+│  [+ Add site mapping]                                                    │
+│                                                                          │
+│  ── Tenant → Client Group ────────────────────────────────────────────  │
+│  NetBox Tenant                 DNSDave Client Group                      │
+│  [finance             ▼]  →   [Finance (group_finance)  ▼]  [× Del]   │
+│  [+ Add tenant mapping]                                                  │
+│                                                                          │
+│  [Save Mappings]                                                         │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Behaviour:**
+- All dropdowns are populated by live API calls to both NetBox (`GET /api/ipam/vrfs/`, etc.) and DNSDave. They are searchable with a debounced text filter.
+- Saving a mapping fires `POST /api/v1/integrations/netbox/mappings`.
+- Mappings take effect on the next sync operation.
+- A `[Test mapping]` button on each row runs a dry-run of that specific mapping against the current NetBox data and shows how many objects would be affected.
+
+---
+
+#### Tab 5 – Activity
+
+```
+┌─ Activity ──────────────────────────────────────────────────────────────┐
+│  [● LIVE]  [⏸]  [⟳ Clear]    Showing 312 events                        │
+│  [All ▼] [Direction: All ▼] [Status: All ▼] [Object type: All ▼]       │
+├──────────┬──────────┬─────────────┬───────────┬────────────┬────────────┤
+│ Time     │ Direction│ Object type │ NetBox ID │ Action     │ Status     │
+├──────────┼──────────┼─────────────┼───────────┼────────────┼────────────┤
+│ 10:23:01 │ ← pull   │ IP Address  │ nb:317    │ created    │ ✅ synced  │
+│ 10:23:00 │ → push   │ IP Address  │ nb:318    │ updated    │ ✅ synced  │
+│ 10:22:48 │ ← webhook│ Prefix      │ nb:42     │ updated    │ ✅ synced  │
+│ 10:21:33 │ → push   │ IP Address  │ nb:205    │ skipped    │ ⏭ skip    │
+│ 10:20:11 │ ← pull   │ Device      │ nb:88     │ conflict   │ ⚠ conflict │← amber row
+└──────────┴──────────┴─────────────┴───────────┴────────────┴────────────┘
+│  [Export CSV]  [Export JSON]                                             │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Clicking a conflict row opens a resolution drawer:**
+
+```
+┌─ Conflict: Device nb:88 ──────────────────────────────────────────────┐
+│  Device: "router-01" (NetBox ID 88)                                    │
+│  Direction: Pull (NetBox → DNSDave)                                    │
+│                                                                         │
+│  Conflict on: dns_record "router-01.london.corp.example"               │
+│                                                                         │
+│  NetBox value:  A  192.168.10.1  (from device primary_ip4)             │
+│  DNSDave value: A  192.168.10.2  (manually set, last modified 3h ago)  │
+│                                                                         │
+│  Resolution:                                                            │
+│  ○ Keep DNSDave value (192.168.10.2)  — ignore NetBox                  │
+│  ○ Use NetBox value   (192.168.10.1)  — overwrite DNSDave              │
+│  ○ Skip permanently   — never sync this object again                   │
+│                                                                         │
+│  [Apply resolution]                    [Cancel]                        │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Activity tab behaviour:**
+- Live SSE stream from `GET /api/v1/integrations/netbox/log/stream`. Same ring-buffer + Web Worker pattern as the Query Log (see §6.2) — max 5,000 events in-memory, virtual scroll.
+- Direction filter: "All" / "→ Push" / "← Pull" / "← Webhook".
+- Status filter: "All" / "✅ Synced" / "⚠ Conflict" / "❌ Error" / "⏭ Skipped".
+- Conflict rows are highlighted amber; a `[Resolve]` button opens the drawer above.
+- Error rows show a `[Retry]` button that fires `POST /api/v1/integrations/netbox/objects/:id/resolve` with `{ action: "retry" }`.
+- `[Export CSV/JSON]` exports the filtered log via the history API.
+
+---
+
+#### Status widget (sidebar + dashboard)
+
+A compact status widget appears in the sidebar under the `Integrations` nav group:
+
+```
+NetBox   ✅ 3m ago   ⚠ 2 conflicts
+```
+
+Clicking it navigates to the Mappings page filtered to conflicts. The Dashboard page shows a "NetBox sync" card with last push/pull times, total managed objects, and a sparkline of sync events per hour.
+
+---
+
+#### Setup Wizard (first-run)
+
+When NetBox integration is not yet configured, the page shows an empty state with a `[Connect NetBox]` wizard button. The wizard steps through:
+
+1. Enter NetBox URL and API token → test connection.
+2. Choose mode (REST API or Diode). If Diode is chosen, shows docker-compose snippet.
+3. Configure push toggles (pre-selected sensible defaults).
+4. Configure pull toggles + filters.
+5. Click `[Generate NetBox Event Rules]` → downloads a Python script to run against NetBox that creates all required event rules. Alternatively, pastes the configuration into a text box if copy-paste is preferred.
+6. Review and save.
+
+---
+
 ## 7. Component Catalogue
 
 ### 7.1 `StatusBadge`
@@ -1466,6 +1765,20 @@ Every UI page maps to specific API endpoints. This table is the source of truth 
 | Settings | GET/PATCH | `/api/v1/settings` | |
 | API Keys | GET/POST/DELETE | `/api/v1/auth/keys` | |
 | Cache flush | POST | `/api/v1/system/cache/flush` | Danger zone |
+| NetBox – config | GET/PUT | `/api/v1/integrations/netbox/config` | Token masked in GET response |
+| NetBox – test connection | POST | `/api/v1/integrations/netbox/test` | Returns version, latency, permissions |
+| NetBox – status | GET | `/api/v1/integrations/netbox/status` | Object counts, last sync times |
+| NetBox – status live | SSE | `/api/v1/integrations/netbox/status/stream` | Real-time sync counters |
+| NetBox – push now | POST | `/api/v1/integrations/netbox/sync/push` | Optional body: `{ types: [...], dry_run: bool }` |
+| NetBox – pull now | POST | `/api/v1/integrations/netbox/sync/pull` | Optional body: `{ types: [...], dry_run: bool }` |
+| NetBox – pull preview | GET | `/api/v1/integrations/netbox/sync/preview` | Dry-run diff; no writes |
+| NetBox – webhook receiver | POST | `/api/v1/integrations/netbox/webhook` | HMAC-SHA256 validated; no auth key needed |
+| NetBox – objects list | GET | `/api/v1/integrations/netbox/objects` | `?status=conflict&type=device&direction=pull` |
+| NetBox – object detail | GET | `/api/v1/integrations/netbox/objects/:id` | Full source + DNSDave data + conflict detail |
+| NetBox – resolve conflict | POST | `/api/v1/integrations/netbox/objects/:id/resolve` | `{ action: "keep_dnsdave" \| "use_netbox" \| "skip" }` |
+| NetBox – mappings | GET/POST/PUT/DELETE | `/api/v1/integrations/netbox/mappings` | VRF/site/tenant/tag → scope/zone/group |
+| NetBox – activity log | GET | `/api/v1/integrations/netbox/log` | Paginated; filterable by direction/status/type |
+| NetBox – activity live | SSE | `/api/v1/integrations/netbox/log/stream` | Real-time sync event stream |
 
 ---
 
@@ -1556,6 +1869,19 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 - [ ] Accessibility audit (WCAG 2.1 AA)
 - [ ] Keyboard shortcut overlay (`?`)
 - [ ] Light theme complete and tested
+
+### UI-v0.7 – NetBox Integration Page
+- [ ] Connection tab: URL, token, mode (REST/Diode), test button, connection status card
+- [ ] Push tab: object-type toggles, conflict strategy, lifecycle dropdowns, context (VRF/site/tenant/tags), push status card, `[Push Now]` + dry-run
+- [ ] Pull tab: mode (webhook/poll/manual), object-type toggles, filter controls (tag/site/VRF/tenant), conflict strategy, FQDN template with live preview, pull status card, `[Pull Now]` + preview modal
+- [ ] Mappings tab: VRF→Scope, Site→Zone, Tenant→Client Group sub-tabs; searchable dropdowns populated from live NetBox + DNSDave API
+- [ ] Activity tab: virtualised live log (Web Worker ring buffer, same pattern as Query Log); direction/status/type filters; conflict resolution drawer
+- [ ] Setup wizard: 6-step first-run flow; `[Generate NetBox Event Rules]` script download
+- [ ] Sidebar `Integrations` nav group with NetBox status widget (● synced / ⚠ N conflicts)
+- [ ] Dashboard `NetBox sync` card (last push/pull, object counts, sparkline)
+- [ ] Conflict review badge on Pull tab header
+- [ ] NetBox webhook URL display with copy button
+- [ ] Token rotation flow (confirm modal; test before invalidating old token)
 
 ---
 

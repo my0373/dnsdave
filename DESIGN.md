@@ -968,6 +968,31 @@ struct LeaseEvent {
 │   ├── GET    /top-domains
 │   ├── GET    /top-blocked
 │   └── GET    /clients
+├── integrations/
+│   └── netbox/
+│       ├── GET    /config
+│       ├── PUT    /config
+│       ├── POST   /test
+│       ├── GET    /status
+│       ├── GET    /status/stream   # SSE
+│       ├── sync/
+│       │   ├── POST   /push
+│       │   ├── POST   /pull
+│       │   └── GET    /preview     # dry-run diff
+│       ├── POST   /webhook         # inbound NetBox event webhook
+│       ├── objects/
+│       │   ├── GET    /
+│       │   ├── GET    /:id
+│       │   ├── POST   /:id/resolve # manual conflict resolution
+│       │   └── DELETE /:id
+│       ├── mappings/
+│       │   ├── GET    /
+│       │   ├── POST   /
+│       │   ├── PUT    /:id
+│       │   └── DELETE /:id
+│       └── log/
+│           ├── GET    /
+│           └── GET    /stream      # SSE live sync activity
 └── system/
     ├── GET    /health
     ├── GET    /ready
@@ -1277,6 +1302,105 @@ CREATE INDEX idx_dhcp_leases_scope    ON dhcp_leases(scope_id);
 | Local records + trie (incl. lease records) | <10 MB |
 | Zone authority trie + SOA table | <1 MB |
 | **Total RSS** | **~301 MB** |
+
+### 10.4 NetBox Integration Tables
+
+```sql
+-- Singleton row holding all NetBox integration configuration.
+-- api_token and secrets are AES-GCM encrypted using DNSDAVE_SECRET_KEY.
+CREATE TABLE netbox_config (
+    id                   TEXT PRIMARY KEY DEFAULT 'singleton',
+    enabled              BOOLEAN NOT NULL DEFAULT FALSE,
+    netbox_url           TEXT NOT NULL DEFAULT '',
+    api_token_enc        TEXT,                 -- AES-GCM encrypted
+    mode                 TEXT NOT NULL DEFAULT 'api',   -- 'api' | 'diode'
+    diode_url            TEXT,
+    diode_key_enc        TEXT,
+    webhook_secret_enc   TEXT,
+    -- Push toggles
+    push_prefixes        BOOLEAN DEFAULT TRUE,
+    push_ip_ranges       BOOLEAN DEFAULT TRUE,
+    push_ip_addresses    BOOLEAN DEFAULT TRUE,
+    push_dns_records     BOOLEAN DEFAULT TRUE,
+    push_devices         BOOLEAN DEFAULT FALSE,
+    push_conflict        TEXT DEFAULT 'overwrite',
+    on_lease_expiry      TEXT DEFAULT 'free',
+    on_scope_delete      TEXT DEFAULT 'keep',
+    -- Pull toggles
+    pull_enabled         BOOLEAN DEFAULT FALSE,
+    pull_mode            TEXT DEFAULT 'webhook',    -- 'webhook' | 'poll' | 'manual'
+    poll_interval_min    INTEGER DEFAULT 15,
+    pull_prefixes        BOOLEAN DEFAULT FALSE,
+    pull_ip_ranges       BOOLEAN DEFAULT FALSE,
+    pull_ip_addresses    BOOLEAN DEFAULT FALSE,
+    pull_devices         BOOLEAN DEFAULT FALSE,
+    pull_vms             BOOLEAN DEFAULT FALSE,
+    pull_reservations    BOOLEAN DEFAULT FALSE,
+    pull_filter_tag      TEXT DEFAULT 'dnsdave',
+    pull_filter_site     TEXT,
+    pull_filter_vrf      TEXT,
+    pull_filter_tenant   TEXT,
+    pull_conflict        TEXT DEFAULT 'skip',
+    auto_create_zones    BOOLEAN DEFAULT FALSE,
+    -- Context / defaults
+    default_vrf          TEXT,
+    default_site         TEXT,
+    default_tenant       TEXT,
+    default_zone         TEXT,
+    device_fqdn_template TEXT DEFAULT '{name}.{site}.{default_zone}',
+    tags                 TEXT[] DEFAULT '{dnsdave}',
+    updated_at           TIMESTAMP DEFAULT NOW()
+);
+
+-- Maps NetBox organisational objects to DNSDave objects.
+CREATE TABLE netbox_mappings (
+    id              TEXT PRIMARY KEY,
+    netbox_type     TEXT NOT NULL,  -- 'vrf' | 'site' | 'tenant' | 'tag'
+    netbox_slug     TEXT NOT NULL,
+    dnsdave_type    TEXT NOT NULL,  -- 'scope' | 'zone' | 'group'
+    dnsdave_id      TEXT NOT NULL,
+    description     TEXT,
+    created_at      TIMESTAMP DEFAULT NOW(),
+    UNIQUE (netbox_type, netbox_slug, dnsdave_type)
+);
+
+-- Tracks every object that has been pushed to or pulled from NetBox.
+CREATE TABLE netbox_sync_objects (
+    id               TEXT PRIMARY KEY,
+    netbox_id        INTEGER NOT NULL,
+    netbox_type      TEXT NOT NULL,  -- 'prefix' | 'iprange' | 'ipaddress' | 'device' | 'virtualmachine'
+    netbox_url       TEXT,
+    direction        TEXT NOT NULL,  -- 'push' | 'pull'
+    dnsdave_type     TEXT NOT NULL,  -- 'scope' | 'ip_range' | 'ip_address' | 'dns_record' | 'reservation'
+    dnsdave_id       TEXT,
+    last_sync_at     TIMESTAMP,
+    sync_status      TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'syncing' | 'synced' | 'conflict' | 'error'
+    retry_count      INTEGER DEFAULT 0,
+    next_retry_at    TIMESTAMP,
+    conflict_detail  JSONB,          -- { field, nb_value, dd_value, strategy }
+    error_detail     TEXT,
+    created_at       TIMESTAMP DEFAULT NOW(),
+    UNIQUE (netbox_id, netbox_type, direction)
+);
+CREATE INDEX idx_netbox_sync_status ON netbox_sync_objects(sync_status);
+CREATE INDEX idx_netbox_sync_type   ON netbox_sync_objects(netbox_type, direction);
+
+-- Append-only audit log of every sync operation.
+CREATE TABLE netbox_sync_log (
+    id           BIGSERIAL PRIMARY KEY,
+    ts           TIMESTAMP NOT NULL DEFAULT NOW(),
+    direction    TEXT NOT NULL,   -- 'push' | 'pull' | 'webhook'
+    trigger      TEXT NOT NULL,   -- 'auto' | 'manual' | 'webhook' | 'poll'
+    object_type  TEXT NOT NULL,
+    netbox_id    INTEGER,
+    dnsdave_id   TEXT,
+    action       TEXT NOT NULL,   -- 'created' | 'updated' | 'deleted' | 'skipped' | 'conflict' | 'error' | 'resolved'
+    detail       JSONB,
+    duration_ms  INTEGER
+);
+CREATE INDEX idx_netbox_log_ts        ON netbox_sync_log(ts DESC);
+CREATE INDEX idx_netbox_log_direction ON netbox_sync_log(direction, ts DESC);
+```
 
 ---
 
@@ -2720,3 +2844,313 @@ Leader election is not required – `dnsdave-netbox` is idempotent (all pushes a
 | `dnsdave_netbox_conflicts_total` | Counter | `strategy`, `object_type` |
 
 The health endpoint returns `503` if the NATS lag exceeds the configured `max_lag_seconds` threshold, enabling Kubernetes liveness probes to surface NetBox outages as a container health issue.
+
+---
+
+### 17.10 Pull – NetBox → DNSDave
+
+`dnsdave-netbox` is fully bidirectional. In addition to pushing DNSDave state into NetBox, it can pull authoritative data from NetBox to create or update DNS records, DHCP scopes, DHCP reservations, and other objects in DNSDave. This makes NetBox the source of truth for IP addressing whilst DNSDave remains the runtime enforcement layer.
+
+#### 17.10.1 What Can Be Pulled
+
+| NetBox object | Pull condition | DNSDave object created / updated |
+|---|---|---|
+| **Prefix** (status=active) | Tagged, or matching site/VRF filter | DHCP scope (network, prefix length, description) |
+| **IP Range** (status=dhcp) | Within a managed/pulled Prefix | DHCP scope pool bounds (start–end) |
+| **IP Address** (status=active, dns_name set) | Tagged or in managed Prefix | DNS A or AAAA record (zone inferred from dns_name or default_zone) |
+| **IP Address** (status=dhcp, `dnsdave_mac` custom field set) | Tagged or in managed Prefix | DHCP static reservation (MAC → IP) |
+| **IP Address** (status=reserved) | Tagged or in managed Prefix | DNS record + DHCP reservation |
+| **Device** (primary_ip4 or primary_ip6 set) | Tagged, or matching site filter | DNS A + PTR record (name from device.name, zone from default_zone or mapping) |
+| **Virtual Machine** (primary_ip4 or primary_ip6 set) | Tagged or matching site filter | DNS A + PTR record |
+| **VRF** | Always (for mapping table) | Registered in mapping table; used to route objects to correct DHCP scope |
+
+#### 17.10.2 Pull Trigger Modes
+
+Three modes are available and can be combined:
+
+**Mode 1 – Webhook (event-driven, recommended)**
+
+NetBox 4.x supports event rules that fire HTTP webhooks on object changes. Configure NetBox to POST to:
+
+```
+POST https://dnsdave.example.com/api/v1/integrations/netbox/webhook
+X-NetBox-Signature: sha256=<hmac>
+Content-Type: application/json
+```
+
+`dnsdave-api` validates the HMAC-SHA256 signature against the configured `webhook_secret`, parses the NetBox event payload, determines the affected DNSDave object(s), and applies the change immediately (subject to conflict strategy).
+
+NetBox event rules to create (one per object type):
+
+| Event Rule | Object Types | Actions | Destination |
+|---|---|---|---|
+| `dnsdave-prefix-sync` | IPAM → Prefix | Created, Updated, Deleted | `POST /api/v1/integrations/netbox/webhook` |
+| `dnsdave-iprange-sync` | IPAM → IP Range | Created, Updated, Deleted | — |
+| `dnsdave-ipaddress-sync` | IPAM → IP Address | Created, Updated, Deleted | — |
+| `dnsdave-device-sync` | DCIM → Device | Created, Updated, Deleted | — |
+| `dnsdave-vm-sync` | Virtualization → VM | Created, Updated, Deleted | — |
+
+A setup wizard in the DNSDave UI (`/integrations/netbox` → "Configure NetBox Webhooks") generates the event rule configuration as a NetBox API script, optionally applying it automatically if the supplied token has permissions.
+
+**Mode 2 – Scheduled Poll**
+
+`dnsdave-netbox` polls the NetBox REST API on a configurable schedule (default: every 15 minutes) and performs a full reconciliation of all managed objects. This is less reactive than webhooks but requires no NetBox configuration beyond the API token.
+
+Poll behaviour:
+- Fetches all Prefixes, IP Ranges, IP Addresses, Devices, and VMs matching the active filters.
+- Computes a diff against the `netbox_sync_objects` tracking table.
+- Applies creates, updates, and deletes according to the configured conflict strategy.
+- Records results in `netbox_sync_log`.
+
+The poll interval is configurable per object type to allow fine-grained control (e.g., Prefixes polled hourly, IP Addresses polled every 5 minutes).
+
+**Mode 3 – Manual**
+
+Triggered from the DNSDave UI or via `POST /api/v1/integrations/netbox/sync/pull`. Runs a full poll immediately and streams progress to the UI via SSE.
+
+#### 17.10.3 Pull Data Mapping
+
+**Prefix → DHCP Scope**
+
+```
+NetBox Prefix {                     DNSDave DHCP Scope {
+  prefix:  "192.168.10.0/24"          id:          "nb-prefix-42"
+  status:  "active"          →        network:     "192.168.10.0"
+  description: "Office LAN"           prefix_len:  24
+  tags:    ["dnsdave"]                name:        "Office LAN"
+  site:    { slug: "london" }         enabled:     true
+  vrf:     { slug: "corporate" }      source:      "netbox"
+  custom_fields: {                    netbox_id:   42
+    gateway: "192.168.10.1"         }
+  }
+}
+```
+
+If the Prefix has no pool bounds, DNSDave creates the scope but does not enable DHCP serving (status=`planned`). Pool bounds are set when the associated IP Range is pulled.
+
+**IP Range → DHCP Pool**
+
+```
+NetBox IP Range {                   DNSDave Scope pool bounds {
+  start_address: "192.168.10.100"     pool_start: "192.168.10.100"
+  end_address:   "192.168.10.200"  →  pool_end:   "192.168.10.200"
+  status:        "dhcp"               parent_scope: "nb-prefix-42"
+}                                   }
+```
+
+**IP Address (active, with dns_name) → DNS Record**
+
+```
+NetBox IP Address {                 DNSDave DNS Record {
+  address:  "192.168.10.5/24"         name:   "fileserver.office.example"
+  status:   "active"          →       type:   "A"
+  dns_name: "fileserver.office.example"  value: "192.168.10.5"
+  tags:     ["dnsdave"]               zone:   "office.example"
+}                                     source: "netbox"
+                                      netbox_id: 317
+                                    }
+```
+
+DNSDave infers the DNS zone from `dns_name`: it strips the record label and checks whether a matching zone exists. If not, and `auto_create_zones = true`, it creates the zone.
+
+**Device → DNS Records**
+
+```
+NetBox Device {                     DNSDave DNS Records {
+  name:        "router-01"            { name: "router-01.london.corp",
+  primary_ip4: { address: "10.0.0.1" }  type: "A", value: "10.0.0.1" }
+  site:        { slug: "london" }  →  { name: "1.0.0.10.in-addr.arpa",
+  tags:        ["dnsdave"]              type: "PTR",
+  device_role: { slug: "router" }       value: "router-01.london.corp." }
+}                                   }
+```
+
+The FQDN is constructed from `{device.name}.{site.slug}.{default_domain}` (configurable template). PTR records are created in the corresponding reverse zone if it exists in DNSDave.
+
+**IP Address (DHCP + MAC) → Static Reservation**
+
+```
+NetBox IP Address {                 DNSDave DHCP Reservation {
+  address: "192.168.10.50/24"         scope_id: "nb-prefix-42"
+  status:  "dhcp"                →    ip:       "192.168.10.50"
+  custom_fields: {                    mac:      "aa:bb:cc:dd:ee:ff"
+    dnsdave_mac: "aa:bb:cc:dd:ee:ff"  name:     "printer-01"
+  }                                   source:   "netbox"
+  dns_name: "printer-01.office.example"  }
+}
+```
+
+#### 17.10.4 Conflict Strategy on Pull
+
+| Strategy | Behaviour |
+|---|---|
+| `skip` (default) | If a matching object exists in DNSDave, leave it unchanged |
+| `overwrite` | NetBox data always wins; DNSDave object is updated to match |
+| `merge` | Update only fields that DNSDave has null/empty; leave populated fields alone |
+| `tag_conflict` | Mark both the DNSDave object and the NetBox object with a conflict tag; alert in the UI; do not write |
+| `ask` | Queue the conflict for manual resolution in the UI conflict review panel |
+
+Conflict strategy can be set globally or overridden per object type.
+
+---
+
+### 17.11 Bidirectional Sync State Machine
+
+Every managed object has a sync state tracked in `netbox_sync_objects`:
+
+```mermaid
+stateDiagram-v2
+    [*]         --> pending     : event received (push or pull)
+    pending     --> syncing     : worker picks up task
+    syncing     --> synced      : NetBox / DNSDave accepted change
+    syncing     --> conflict    : object exists with different value
+    syncing     --> error       : network / auth failure
+    conflict    --> synced      : operator resolves in UI
+    conflict    --> synced      : auto-resolved by strategy
+    error       --> pending     : retry after back-off (max 5 attempts)
+    synced      --> pending     : source object changed again
+    synced      --> [*]         : object deleted in source (removed from tracking)
+```
+
+**Retry logic:**
+- Errors back off exponentially: 30s, 2m, 8m, 32m, 2h.
+- After 5 failures the object is marked `error` and requires manual intervention.
+- A failed push does not block subsequent events for other objects.
+
+---
+
+### 17.12 Object Mapping Configuration
+
+Mappings control how NetBox organisational objects (VRF, site, tenant, tag) are associated with DNSDave objects (DHCP scope, DNS zone, client group).
+
+| NetBox concept | Maps to | Effect |
+|---|---|---|
+| VRF | DHCP scope | Pulled Prefixes/IP Ranges in this VRF are associated with the mapped scope |
+| Site | DNS zone suffix | Devices in this site get DNS names under the mapped zone (e.g., `.london.corp.example`) |
+| Tenant | Client group | Devices/VMs belonging to this tenant are placed in the corresponding client group |
+| Tag | Sync filter | Only objects with this tag are included in push/pull operations |
+
+---
+
+### 17.13 REST API for the Integration
+
+These endpoints are served by `dnsdave-api` and are the primary interface for the UI page and automation.
+
+```
+/api/v1/integrations/
+└── netbox/
+    ├── GET    /config              # full config (token masked to last 4 chars)
+    ├── PUT    /config              # update config (token, URL, mode, push/pull toggles)
+    ├── POST   /test                # test connection → { version, latency_ms, status }
+    ├── GET    /status              # last push/pull timestamps, object counts, error counts
+    ├── GET    /status/stream       # SSE stream of sync activity (live progress)
+    │
+    ├── sync/
+    │   ├── POST   /push            # trigger manual push (all objects or filtered)
+    │   ├── POST   /pull            # trigger manual pull (all objects or filtered)
+    │   └── GET    /preview         # dry-run: returns what a pull would create/update/delete
+    │
+    ├── webhook/
+    │   └── POST   /               # receive NetBox event webhooks (HMAC-SHA256 validated)
+    │
+    ├── objects/
+    │   ├── GET    /               # paginated list of all tracked objects + sync status
+    │   ├── GET    /:id            # individual object detail (source data + DNSDave data + conflicts)
+    │   ├── POST   /:id/resolve    # manually resolve a conflict
+    │   └── DELETE /:id           # remove from tracking (does not delete the underlying record)
+    │
+    ├── mappings/
+    │   ├── GET    /               # list all VRF/site/tenant/tag mappings
+    │   ├── POST   /               # create mapping
+    │   ├── PUT    /:id            # update mapping
+    │   └── DELETE /:id           # remove mapping
+    │
+    └── log/
+        ├── GET    /               # paginated sync activity log
+        └── GET    /stream         # SSE live sync activity stream
+```
+
+**Key request/response examples:**
+
+`PUT /api/v1/integrations/netbox/config`:
+```json
+{
+  "enabled": true,
+  "netbox_url": "https://netbox.example.com",
+  "api_token": "abc123def456...",
+  "mode": "api",
+  "diode_url": null,
+  "diode_api_key": null,
+  "push": {
+    "prefixes": true,
+    "ip_ranges": true,
+    "ip_addresses": true,
+    "dns_records": true,
+    "devices": false,
+    "conflict": "overwrite",
+    "on_lease_expiry": "free",
+    "on_scope_delete": "keep"
+  },
+  "pull": {
+    "enabled": true,
+    "mode": "webhook",
+    "poll_interval_minutes": 15,
+    "prefixes": true,
+    "ip_ranges": true,
+    "ip_addresses": true,
+    "devices": true,
+    "virtual_machines": true,
+    "reservations": true,
+    "filter_tag": "dnsdave",
+    "filter_site": "",
+    "filter_vrf": "",
+    "filter_tenant": "",
+    "conflict": "skip",
+    "auto_create_zones": false
+  },
+  "context": {
+    "default_vrf": "",
+    "default_site": "",
+    "default_tenant": "",
+    "default_zone": "home.arpa",
+    "device_fqdn_template": "{name}.{site}.{default_zone}",
+    "tags": ["dnsdave"]
+  }
+}
+```
+
+`GET /api/v1/integrations/netbox/sync/preview`:
+```json
+{
+  "would_create": [
+    { "type": "dns_record", "name": "fileserver.office.example", "value": "192.168.10.5", "source_nb_id": 317 }
+  ],
+  "would_update": [
+    { "type": "dhcp_scope", "id": "nb-prefix-42", "field": "name", "from": "Office", "to": "Office LAN" }
+  ],
+  "would_delete": [],
+  "conflicts": [
+    { "type": "dns_record", "name": "printer.home.arpa", "nb_value": "192.168.10.50", "dd_value": "192.168.1.50", "strategy": "skip" }
+  ],
+  "total_nb_objects": 247,
+  "scanned_in_ms": 1842
+}
+```
+
+`POST /api/v1/integrations/netbox/webhook` (received from NetBox):
+```json
+{
+  "event": "updated",
+  "timestamp": "2026-04-05T10:23:01Z",
+  "model": "ipaddress",
+  "username": "admin",
+  "data": {
+    "id": 317,
+    "url": "https://netbox.example.com/api/ipam/ip-addresses/317/",
+    "address": "192.168.10.5/24",
+    "status": { "value": "active" },
+    "dns_name": "fileserver.office.example",
+    "tags": [{ "slug": "dnsdave" }]
+  }
+}
+```

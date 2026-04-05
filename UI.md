@@ -244,12 +244,19 @@ Sections and items:
 
   ○ INTEGRATIONS
     NetBox          ✅ synced  (or ⚠ 2 conflicts / ❌ error)
+
+  ○ ACCESS CONTROL
+    Users
+    Groups
+    Roles
+    Audit Log
 ```
 
 - Section headers are non-clickable separators.
 - Active item highlighted with `--dns` left border + faint background tint.
 - `● live` badge pulses (2s animation) when SSE stream is connected.
 - The `NetBox` sidebar item shows an inline status indicator: a green dot when healthy, an amber dot with conflict count when unresolved conflicts exist, or a red dot on error. Hovering shows a tooltip with last sync time.
+- The `ACCESS CONTROL` section is only rendered if the user holds at least one of `iam_users:view`, `iam_groups:view`, `iam_roles:view`, or `iam_audit:view`. Individual sub-items are hidden if the corresponding permission is absent.
 - Collapse button at bottom toggles icon-only mode; state persisted in `localStorage`.
 - **System status footer** (bottom of sidebar, always visible):
   - NATS: `● Connected` / `● Degraded` / `● Down`
@@ -1293,6 +1300,336 @@ When NetBox integration is not yet configured, the page shows an empty state wit
 
 ---
 
+### 6.14 Users, Groups & RBAC
+
+**Purpose:** Manage local user accounts, groups, and the full role-based access control hierarchy. Designed for network and security administrators who need fine-grained, auditable control over who can see and do what inside DNSDave.
+
+**Navigation:** `Settings → Access Control` (also visible in the sidebar under the `INFRASTRUCTURE` section as "Access Control").
+
+**Required permission to view this page:** `iam_users:view` (read-only) or `iam_roles:view`. Write actions each require their respective permission.
+
+---
+
+#### Tab layout
+
+```
+[Users] [Groups] [Roles] [Audit Log]
+```
+
+---
+
+#### Tab 1 – Users
+
+```
+┌─ Users ──────────────────────────────────────────── [+ New User] ─────┐
+│                                                                         │
+│  [🔍 Search users...        ]  [Status: All ▼]  [Group: All ▼]        │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ ● Alice Smith      alice        dns_admin, operator   ✅ Active  │   │
+│  │ ● Bob Jones        bjones       read_only             ✅ Active  │   │
+│  │ ● Carol Zhang      carol        dhcp_admin            ✅ Active  │   │
+│  │ ○ Dave Brown       dave         operator              ⚠ Locked   │   │← amber
+│  │ ○ svc-monitoring   monitoring   read_only             ✅ Active  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Clicking a user row opens a user detail drawer:**
+
+```
+┌─ Alice Smith ─────────────────────────────────────────────────────────┐
+│  [Profile] [Permissions] [Groups] [API Keys] [Sessions]               │
+│                                                                        │
+│  ── Profile tab ──────────────────────────────────────────────────── │
+│  Display name:  [Alice Smith                ]                         │
+│  Username:      [alice                      ]                         │
+│  Email:         [alice@example.com          ]                         │
+│  Status:        ● Active  ○ Inactive                                  │
+│                                                                        │
+│  Password:      [Reset password]  (sends email / shows temp password) │
+│  Last login:    2 hours ago from 192.168.1.42                         │
+│  Failed logins: 0                                                     │
+│                                                                        │
+│  [Save changes]  [Deactivate user]  [Delete user]                    │
+│                                                                        │
+│  ── Permissions tab ──────────────────────────────────────────────── │
+│  Shows the complete resolved effective permission set for this user.  │
+│  Permissions are colour-coded by source:                              │
+│    🔵 Role (via group)   🟢 Direct grant   🔴 Direct deny            │
+│                                                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │ Resource          │ view │create│ edit │delete│ sync │ export   │  │
+│  │─────────────────────────────────────────────────────────────────│  │
+│  │ dns_records       │  🔵  │  🔵  │  🔵  │  🔵  │  -   │  🔵    │  │
+│  │ dns_zones         │  🔵  │  🔵  │  🔵  │  -   │  -   │  -     │  │
+│  │ blocklists        │  🔵  │  🔵  │  🔵  │  🔵  │  🔵  │  -     │  │
+│  │ dhcp_scopes       │  🔵  │  -   │  -   │  -   │  -   │  -     │  │
+│  │ query_log         │  🔵  │  -   │  -   │  -   │  -   │  🟢    │  │← direct
+│  │ analytics         │  🔵  │  -   │  -   │  -   │  -   │  -     │  │
+│  │ iam_users         │  -   │  -   │  -   │  -   │  -   │  -     │  │← no access
+│  │ settings          │  🔴  │  -   │  -   │  -   │  -   │  -     │  │← denied
+│  └─────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  [+ Add direct grant]  [+ Add direct deny]                           │
+│                                                                        │
+│  ── Groups tab ───────────────────────────────────────────────────── │
+│  Group         Roles                      Member since                │
+│  DNS Team      dns_admin, operator        14 Jan 2026                │
+│  All Staff     read_only                  01 Jan 2026                │
+│  [+ Add to group]                                                     │
+│                                                                        │
+│  ── API Keys tab ─────────────────────────────────────────────────── │
+│  Name           Prefix      Permissions          Last used   Expires   │
+│  ci-pipeline    dd_8f3a...  dns_records:view     3h ago      Never    │
+│  monitoring     dd_2c91...  analytics:view       1m ago      2027-01  │
+│  [+ Create API key]                                                    │
+│                                                                        │
+│  ── Sessions tab ─────────────────────────────────────────────────── │
+│  Started       IP             User Agent               Action         │
+│  2h ago        192.168.1.42   Chrome 124 / macOS       [Revoke]       │
+│  3 days ago    10.0.0.1       curl/8.4.0               [Revoke]       │
+│  [Revoke all sessions]                                                 │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Create User modal:**
+
+```
+┌─ New User ──────────────────────────────────────────────────────────┐
+│  Display name:   [                          ]                        │
+│  Username:       [                          ]                        │
+│  Email:          [                          ]                        │
+│  Initial password:                                                   │
+│    ● Auto-generate and show once                                     │
+│    ○ Set manually       [                  ] [👁]                   │
+│    ☑ Require change on first login                                   │
+│                                                                      │
+│  Groups:  [+ Add to group ▼]                                        │
+│                                                                      │
+│  [Create user]                        [Cancel]                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Create API Key modal:**
+
+```
+┌─ New API Key ────────────────────────────────────────────────────────┐
+│  Key name:        [ci-pipeline                   ]                   │
+│  Expires:         ● Never  ○ Date: [          ]                      │
+│  Source IP CIDR:  [10.0.0.0/8, 192.168.0.0/16  ] (optional)        │
+│                                                                      │
+│  Permissions:     ○ Inherit all (same as user)                       │
+│                   ● Custom subset:                                   │
+│    ┌──────────────────────────────────────────────────────────────┐  │
+│    │  (same permission matrix as Permissions tab, user's perms    │  │
+│    │  are the ceiling — any permission the user lacks is greyed)  │  │
+│    └──────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  [Generate key]                       [Cancel]                      │
+│                                                                      │
+│  ┌─ Generated key (shown once only) ─────────────────────────────┐  │
+│  │  dd_8f3a....................................XYZ123             │  │
+│  │  [📋 Copy]                                                     │  │
+│  │  ⚠ Store this key now. It cannot be retrieved again.          │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### Tab 2 – Groups
+
+```
+┌─ Groups ─────────────────────────────────────────── [+ New Group] ─┐
+│                                                                      │
+│  [🔍 Search groups...      ]                                         │
+│                                                                      │
+│  Name             Members   Roles                 Type               │
+│  DNS Team         4         dns_admin, operator   Custom             │
+│  DHCP Team        2         dhcp_admin            Custom             │
+│  All Staff        18        read_only             Custom             │
+│  administrators   1         super_admin           System (built-in)  │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Group detail drawer:**
+
+```
+┌─ DNS Team ──────────────────────────────────────────────────────────┐
+│  Name:        [DNS Team         ]   Description: [DNS operators  ]  │
+│                                                                      │
+│  ── Roles ──────────────────────────────────────────────────────── │
+│  dns_admin   (built-in)  [× Remove]                                 │
+│  operator    (built-in)  [× Remove]                                 │
+│  [+ Assign role ▼]                                                  │
+│                                                                      │
+│  ── Members ────────────────────────────────────────────────────── │
+│  ● Alice Smith   alice    ✅ Active     [× Remove]                  │
+│  ● Carol Zhang   carol    ✅ Active     [× Remove]                  │
+│  [+ Add members ▼]  (searchable user picker)                        │
+│                                                                      │
+│  ── Effective permissions ──────────────────────────────────────── │
+│  (Same permission matrix as user permissions tab; read-only here;   │
+│  reflects the union of all roles assigned to this group)            │
+│                                                                      │
+│  [Save]  [Delete group]                                             │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### Tab 3 – Roles
+
+```
+┌─ Roles ──────────────────────────────────────────── [+ New Role] ──┐
+│                                                                      │
+│  [🔍 Search roles...      ]                                          │
+│                                                                      │
+│  Name           Permissions   Groups assigned   Type                 │
+│  super_admin    All (wildcard) administrators   Built-in (locked)    │
+│  admin          22            -                 Built-in (locked)    │
+│  dns_admin      14            DNS Team          Built-in (locked)    │
+│  dhcp_admin     12            DHCP Team         Built-in (locked)    │
+│  read_only       7            All Staff         Built-in (locked)    │
+│  operator        9            -                 Built-in (locked)    │
+│  netbox_sync     5            -                 Built-in (locked)    │
+│  zone-editors    8            -                 Custom               │
+│  dhcp-readonly   3            -                 Custom               │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Role detail drawer – Permission Matrix:**
+
+```
+┌─ Role: zone-editors ─────────────────────────────────────────────────┐
+│  Name:         [zone-editors      ]                                   │
+│  Description:  [Edit DNS zones and records only          ]           │
+│                                                                       │
+│  ── Permission Matrix ─────────────────────────────────────────────  │
+│                                                                       │
+│  Columns: view | create | edit | delete | bulk | sync | export | rotate
+│  Rows: each resource                                                  │
+│                                                                       │
+│  ┌──────────────────┬──────┬────────┬──────┬────────┬──────────────┐ │
+│  │ Resource         │ view │ create │ edit │ delete │ bulk  export │ │
+│  ├──────────────────┼──────┼────────┼──────┼────────┼──────────────┤ │
+│  │ dns_records      │  ☑   │   ☑    │  ☑   │   ☑    │  ☐     ☑   │ │
+│  │ dns_zones        │  ☑   │   ☑    │  ☑   │   ☐    │  ☐     ☐   │ │
+│  │ dns_upstreams    │  ☑   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ dns_forwardzones │  ☑   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ dns_dnssec       │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ blocklists       │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ dhcp_scopes      │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ dhcp_leases      │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ dhcp_reservations│  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ clients          │  ☑   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ query_log        │  ☑   │   ☐    │  ☐   │   ☐    │  ☐     ☑   │ │
+│  │ analytics        │  ☑   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ certificates     │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ cluster          │  ☑   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ settings         │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ integrations_*   │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ iam_users        │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ iam_groups       │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ iam_roles        │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  │ iam_audit        │  ☐   │   ☐    │  ☐   │   ☐    │  ☐     ☐   │ │
+│  └──────────────────┴──────┴────────┴──────┴────────┴──────────────┘ │
+│                                                                       │
+│  ── Scope overrides ────────────────────────────────────────────── │
+│  For actions where scope matters, override default (all):             │
+│  dns_records:delete  → scope: [own ▼]  (can only delete own records) │
+│  [+ Add scope override]                                              │
+│                                                                       │
+│  ── Assigned to groups ──────────────────────────────────────────── │
+│  DNS Team, Freelancers                                                │
+│                                                                       │
+│  [Save role]  [Clone role]  [Delete role]  (delete blocked if        │
+│                                             currently assigned)       │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+**Matrix interaction:**
+- Each cell is a checkbox. Hovering any cell shows a tooltip: `dns_records:edit – Allow editing DNS resource records`.
+- "Select row" and "Select column" shortcut buttons appear at top-left/bottom of the matrix.
+- Changing any checkbox immediately shows an unsaved-changes indicator; changes are committed only on `[Save role]`.
+- Built-in roles show the matrix read-only with a banner: "Built-in roles cannot be modified. Clone this role to create a custom version."
+
+---
+
+#### Tab 4 – Audit Log
+
+```
+┌─ Audit Log ──────────────────────────────────────────────────────────┐
+│  [● LIVE]  [⏸]  [🔍 Search...     ]                                  │
+│  [User: All ▼]  [Action: All ▼]  [Outcome: All ▼]  [Resource: All ▼] │
+│  [Date range: Last 7 days ▼]                              [Export ▼] │
+│                                                                       │
+├──────────┬───────────┬──────────────┬──────────────┬─────────────────┤
+│ Time     │ User      │ Action       │ Resource     │ Outcome          │
+├──────────┼───────────┼──────────────┼──────────────┼─────────────────┤
+│ 10:31:04 │ alice     │ edit         │ dns_records  │ ✅ success        │
+│ 10:30:58 │ bjones    │ view         │ analytics    │ ✅ success        │
+│ 10:29:11 │ carol     │ create       │ dhcp_scopes  │ ✅ success        │
+│ 10:28:45 │ unknown   │ login_failed │ auth         │ ⚠ forbidden      │← amber
+│ 10:27:03 │ dave      │ delete       │ dns_zones    │ ❌ forbidden      │← red
+└──────────┴───────────┴──────────────┴──────────────┴─────────────────┘
+│  Showing 1–50 of 4,821 events                  [← Prev]  [Next →]    │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+**Clicking any audit row expands an inline diff panel:**
+
+```
+┌─ Audit event detail ──────────────────────────────────────────────┐
+│  Time:      2026-04-05 10:31:04.832 UTC                            │
+│  User:      alice (id: user_01j...) from 192.168.1.42              │
+│  Session:   JWT jti: tok_01j... (Chrome, macOS)                    │
+│  Action:    PATCH /api/v1/dns/records/rec_01j...                   │
+│  Resource:  dns_records / rec_01j... (A record: webserver.home.arpa)│
+│  Outcome:   ✅ success (200 OK)                                     │
+│                                                                     │
+│  Before:                      After:                               │
+│  {                            {                                    │
+│    "value": "192.168.1.5",      "value": "192.168.1.10",          │
+│    "ttl": 300                   "ttl": 300                         │
+│  }                            }                                    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Audit log behaviour:**
+- Live mode uses SSE from `GET /api/v1/iam/audit/stream`; same Web Worker ring-buffer pattern (max 2,000 rows in-memory, virtual scroll).
+- `[Export ▼]` exports current filtered view as CSV, NDJSON, or JSON; date-ranges are forwarded as query params to the history API.
+- Forbidden events are highlighted in amber (auth failures) or red (explicit 403 on a resource the user accessed deliberately).
+
+---
+
+#### Direct Permission Grant / Deny Modal
+
+Accessible from the user's **Permissions tab** via `[+ Add direct grant]` or `[+ Add direct deny]`:
+
+```
+┌─ Add Permission Override ──────────────────────────────────────────┐
+│  Effect:    ● Grant  ○ Deny                                         │
+│                                                                     │
+│  Resource:  [dns_records       ▼]                                   │
+│  Action:    [export            ▼]                                   │
+│  Scope:     [all               ▼]   (own / group / all)            │
+│                                                                     │
+│  Reason:    [Approved by team lead – ticket #1234   ]              │
+│  Expires:   ● Never  ○ [2026-12-31  ]                              │
+│                                                                     │
+│  [Save]                          [Cancel]                           │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Denies are shown in the permission matrix with a red `✗` and take precedence over all role-inherited grants.
+
+---
+
 ## 7. Component Catalogue
 
 ### 7.1 `StatusBadge`
@@ -1654,7 +1991,129 @@ The top bar `● LIVE` indicator reflects the **worst** state across all active 
 
 ---
 
-## 9. Responsive Design
+## 9. RBAC Enforcement in the UI
+
+The UI enforces every permission server-side (the API returns 403 for denied requests) and client-side (to provide a clean, non-confusing experience by hiding or disabling controls the current user cannot use).
+
+### 9.1 Permission Store
+
+On successful login, the resolved effective permission set is returned in the JWT and stored in a SvelteKit client-side store:
+
+```typescript
+// src/lib/stores/permissions.ts
+import { readable } from 'svelte/store';
+
+export type Permission = string; // "resource:action[:scope]"
+
+export interface PermissionStore {
+  has: (perm: Permission) => boolean;
+  hasAny: (...perms: Permission[]) => boolean;
+  hasAll: (...perms: Permission[]) => boolean;
+  isSuperAdmin: () => boolean;
+}
+
+// Populated from the JWT claims on login and on every token refresh.
+export const perms: Readable<PermissionStore> = /* ... */;
+```
+
+The store is populated from the JWT `permissions` array on login and refreshed transparently whenever the SSR layer issues a new JWT. Permission checks are pure in-memory lookups against a `Set<string>` — zero network requests.
+
+### 9.2 Guarded Components
+
+Three composable guard primitives are provided. All produce no DOM output when the condition is false (no hidden elements or aria-hidden tricks that leak information):
+
+**`<Guard perm="dns_records:create">`**
+
+Renders children only if the user holds the specified permission. Used to wrap `[+ Create Record]` buttons, form fields, and any interactive element that triggers a write.
+
+```svelte
+<Guard perm="dns_records:create">
+  <Button>+ Create Record</Button>
+</Guard>
+```
+
+**`<GuardPage perms={["iam_users:view"]}>`**
+
+Page-level guard, placed in SvelteKit `+layout.svelte` or `+page.svelte`. If the permission is absent, redirects to `/403` with a clear "you do not have access to this page" message showing which permission is required.
+
+```svelte
+<!-- routes/iam/+page.svelte -->
+<GuardPage perms={["iam_users:view", "iam_roles:view"]} requireAny>
+  <UserManagementPage />
+</GuardPage>
+```
+
+**`<GuardDisable perm="dns_records:edit" tooltip="You do not have permission to edit records">`**
+
+Renders children but wraps them in a `<fieldset disabled>` with a tooltip explaining why. Used for form fields that should be visible but not editable (e.g., a read-only user can see all settings but cannot change them).
+
+```svelte
+<GuardDisable perm="settings:edit" tooltip="Requires settings:edit permission">
+  <Input bind:value={settings.defaultTtl} />
+</GuardDisable>
+```
+
+### 9.3 Navigation Enforcement
+
+The sidebar navigation is generated from a route manifest that includes permission annotations:
+
+```typescript
+const routes: NavItem[] = [
+  { label: 'Dashboard',     href: '/dashboard',    icon: 'LayoutDashboard', perm: null },
+  { label: 'Query Log',     href: '/queries',      icon: 'ScrollText',      perm: 'query_log:view' },
+  { label: 'DNS Records',   href: '/dns/records',  icon: 'Globe',           perm: 'dns_records:view' },
+  { label: 'DNS Zones',     href: '/dns/zones',    icon: 'Map',             perm: 'dns_zones:view' },
+  { label: 'Blocklists',    href: '/blocklists',   icon: 'ShieldOff',       perm: 'blocklists:view' },
+  { label: 'DHCP Scopes',   href: '/dhcp/scopes',  icon: 'Network',         perm: 'dhcp_scopes:view' },
+  { label: 'DHCP Leases',   href: '/dhcp/leases',  icon: 'Timer',           perm: 'dhcp_leases:view' },
+  { label: 'Analytics',     href: '/analytics',    icon: 'BarChart3',       perm: 'analytics:view' },
+  { label: 'Cluster',       href: '/cluster',      icon: 'Server',          perm: 'cluster:view' },
+  { label: 'Settings',      href: '/settings',     icon: 'Settings2',       perm: 'settings:view' },
+  { label: 'NetBox',        href: '/integrations/netbox', icon: 'Box',      perm: 'integrations_netbox:view' },
+  { label: 'Access Control',href: '/iam',          icon: 'ShieldCheck',     perm: 'iam_users:view', altPerm: 'iam_roles:view' },
+];
+```
+
+Nav items where the user lacks the required permission are completely omitted from the rendered sidebar — no greyed-out entries, no locked icons. This prevents information leakage about features the user cannot use.
+
+### 9.4 API Error Handling
+
+If the API returns `403 Forbidden` (which can happen if permissions changed after the JWT was issued), the UI:
+
+1. Shows a non-dismissible inline error banner: `"Your permissions have changed. Certain actions on this page are now unavailable."`.
+2. Refreshes the JWT (hitting `POST /api/v1/auth/refresh`) to get an updated permission set.
+3. Re-evaluates all guards on the current page against the new permission set.
+4. Re-renders the page — some controls may appear or disappear.
+
+### 9.5 Enforced Per-Page Permissions
+
+| Page / Section | Required permission | Notes |
+|---|---|---|
+| Dashboard | `analytics:view` (fallback to any `*:view`) | Stat cards each guarded individually |
+| Query Log | `query_log:view` | Export button requires `query_log:export` |
+| DNS Records | `dns_records:view` | Write actions individually guarded |
+| DNS Zones | `dns_zones:view` | Zone delete requires `dns_zones:delete` |
+| Blocklists | `blocklists:view` | Sync requires `blocklists:sync` |
+| Forward Zones | `dns_forwardzones:view` | |
+| DHCP Scopes | `dhcp_scopes:view` | |
+| DHCP Leases | `dhcp_leases:view` | Release requires `dhcp_leases:edit` |
+| DHCP Reservations | `dhcp_reservations:view` | |
+| Clients / Groups | `clients:view` | Group edit requires `client_groups:edit` |
+| Analytics | `analytics:view` | |
+| Cluster | `cluster:view` | |
+| Certificates | `certificates:view` | Rotate requires `certificates:rotate` |
+| DNSSEC Keys | `dns_dnssec:view` | Key generation requires `dns_dnssec:create` |
+| Settings | `settings:view` | Write requires `settings:edit` |
+| API Keys | `api_keys:view` | Can always view/manage own keys |
+| NetBox Integration | `integrations_netbox:view` | Push/pull triggers require `integrations_netbox:sync` |
+| Access Control – Users | `iam_users:view` | Edit requires `iam_users:edit` |
+| Access Control – Groups | `iam_groups:view` | |
+| Access Control – Roles | `iam_roles:view` | Edit requires `iam_roles:edit` |
+| Access Control – Audit Log | `iam_audit:view` | |
+
+---
+
+## 10. Responsive Design
 
 ### Breakpoints
 
@@ -1682,7 +2141,7 @@ The top bar `● LIVE` indicator reflects the **worst** state across all active 
 
 ---
 
-## 10. Accessibility
+## 11. Accessibility
 
 | Requirement | Implementation |
 |-------------|---------------|
@@ -1695,7 +2154,7 @@ The top bar `● LIVE` indicator reflects the **worst** state across all active 
 
 ---
 
-## 11. Keyboard Shortcuts
+## 12. Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
@@ -1716,7 +2175,7 @@ The top bar `● LIVE` indicator reflects the **worst** state across all active 
 
 ---
 
-## 12. API Integration Map
+## 13. API Integration Map
 
 Every UI page maps to specific API endpoints. This table is the source of truth for the API contract the UI depends on.
 
@@ -1779,10 +2238,36 @@ Every UI page maps to specific API endpoints. This table is the source of truth 
 | NetBox – mappings | GET/POST/PUT/DELETE | `/api/v1/integrations/netbox/mappings` | VRF/site/tenant/tag → scope/zone/group |
 | NetBox – activity log | GET | `/api/v1/integrations/netbox/log` | Paginated; filterable by direction/status/type |
 | NetBox – activity live | SSE | `/api/v1/integrations/netbox/log/stream` | Real-time sync event stream |
+| Auth – login | POST | `/api/v1/auth/login` | Returns JWT; sets httpOnly refresh cookie |
+| Auth – logout | POST | `/api/v1/auth/logout` | Revokes refresh token |
+| Auth – refresh | POST | `/api/v1/auth/refresh` | SvelteKit SSR calls this transparently |
+| Auth – own profile | GET | `/api/v1/auth/me` | Returns profile + effective permissions |
+| Auth – change password | PATCH | `/api/v1/auth/me/password` | |
+| IAM – users list | GET | `/api/v1/iam/users` | `?q=&status=&group_id=` |
+| IAM – create user | POST | `/api/v1/iam/users` | |
+| IAM – user detail | GET | `/api/v1/iam/users/:id` | |
+| IAM – update user | PATCH | `/api/v1/iam/users/:id` | |
+| IAM – deactivate user | DELETE | `/api/v1/iam/users/:id` | Soft delete |
+| IAM – reset password | POST | `/api/v1/iam/users/:id/reset-password` | |
+| IAM – unlock user | POST | `/api/v1/iam/users/:id/unlock` | |
+| IAM – user sessions | GET | `/api/v1/iam/users/:id/sessions` | |
+| IAM – revoke sessions | DELETE | `/api/v1/iam/users/:id/sessions` | |
+| IAM – effective permissions | GET | `/api/v1/iam/users/:id/permissions` | Resolved set for display in matrix |
+| IAM – user API keys | GET/POST/DELETE | `/api/v1/iam/users/:id/api-keys` | |
+| IAM – groups list | GET | `/api/v1/iam/groups` | |
+| IAM – group CRUD | POST/PATCH/DELETE | `/api/v1/iam/groups/:id` | |
+| IAM – group members | GET/POST/DELETE | `/api/v1/iam/groups/:id/members` | |
+| IAM – group roles | GET/POST/DELETE | `/api/v1/iam/groups/:id/roles` | |
+| IAM – roles list | GET | `/api/v1/iam/roles` | Built-in + custom |
+| IAM – role CRUD | POST/PATCH/DELETE | `/api/v1/iam/roles/:id` | Custom only for write |
+| IAM – role permissions | GET/PUT/POST/DELETE | `/api/v1/iam/roles/:id/permissions` | Full matrix replacement or individual |
+| IAM – permission enum | GET | `/api/v1/iam/permissions` | Drives matrix dropdown population |
+| IAM – audit log | GET | `/api/v1/iam/audit` | `?user_id=&resource=&action=&outcome=&from=&to=` |
+| IAM – audit live | SSE | `/api/v1/iam/audit/stream` | Real-time event stream |
 
 ---
 
-## 13. Deployment
+## 14. Deployment
 
 The UI runs as a dedicated container: `dnsdave-ui`.
 
@@ -1824,7 +2309,7 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 
 ---
 
-## 14. UI Milestones
+## 15. UI Milestones
 
 ### UI-v0.1 – Core shell + Dashboard
 - [ ] SvelteKit project scaffold, Tailwind, shadcn-svelte
@@ -1869,6 +2354,27 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 - [ ] Accessibility audit (WCAG 2.1 AA)
 - [ ] Keyboard shortcut overlay (`?`)
 - [ ] Light theme complete and tested
+
+### UI-v0.8 – RBAC and User Management
+- [ ] Login page (username/password form, "remember me", forgot password flow)
+- [ ] `<Guard>`, `<GuardPage>`, `<GuardDisable>` Svelte components
+- [ ] `permissionStore` populated from JWT on login and refresh
+- [ ] Sidebar `ACCESS CONTROL` section; per-item permission gating
+- [ ] Users tab: paginated table, status filter, group filter
+- [ ] User detail drawer: Profile / Permissions / Groups / API Keys / Sessions tabs
+- [ ] Interactive permission matrix (resource × action grid) with colour-coded source indicators
+- [ ] Direct grant/deny modal with resource, action, scope, expiry, reason
+- [ ] Groups tab: list with member/role counts; group detail drawer with members and role management
+- [ ] Roles tab: list (built-in locked, custom editable); role detail drawer with full checkbox matrix
+- [ ] Scope override UI on role permissions (per-action `own / group / all` dropdown)
+- [ ] Role clone action
+- [ ] Create user modal (auto-generate password / manual; force-change on login)
+- [ ] Create API key modal with custom permission subset (ceiling = owner's permissions)
+- [ ] API key display on creation (shown once, copy button)
+- [ ] Audit Log tab: virtualised live log (SSE), expand-to-diff panel for each row
+- [ ] 403 page + permission-refresh flow (JWT re-issue on 403 response)
+- [ ] Per-page `<GuardPage>` wrappers for all existing pages
+- [ ] All write buttons wrapped in `<Guard>` components
 
 ### UI-v0.7 – NetBox Integration Page
 - [ ] Connection tab: URL, token, mode (REST/Diode), test button, connection status card

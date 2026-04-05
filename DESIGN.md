@@ -891,8 +891,62 @@ struct LeaseEvent {
 ```
 /api/v1/
 ├── auth/
-│   ├── POST   token
-│   └── DELETE token
+│   ├── POST   /login              # password auth → JWT + refresh cookie
+│   ├── POST   /logout             # revoke refresh token
+│   ├── POST   /refresh            # exchange refresh cookie → new JWT
+│   ├── GET    /me                 # own profile + effective permissions
+│   └── PATCH  /me/password        # change own password
+│
+├── iam/
+│   ├── users/
+│   │   ├── GET    /               # list users (paginated, filterable)
+│   │   ├── POST   /               # create user
+│   │   ├── GET    /:id
+│   │   ├── PATCH  /:id            # update profile / active status
+│   │   ├── DELETE /:id            # deactivate (soft delete)
+│   │   ├── POST   /:id/reset-password
+│   │   ├── POST   /:id/unlock
+│   │   ├── GET    /:id/sessions   # active JWT sessions
+│   │   ├── DELETE /:id/sessions   # revoke all sessions
+│   │   ├── GET    /:id/permissions  # resolved effective permission set
+│   │   └── api-keys/
+│   │       ├── GET    /
+│   │       ├── POST   /           # create key (raw key shown once)
+│   │       └── DELETE /:kid
+│   │
+│   ├── groups/
+│   │   ├── GET    /
+│   │   ├── POST   /
+│   │   ├── GET    /:id
+│   │   ├── PATCH  /:id
+│   │   ├── DELETE /:id
+│   │   ├── members/
+│   │   │   ├── GET    /
+│   │   │   ├── POST   /           # { user_ids: [...] }
+│   │   │   └── DELETE /:uid
+│   │   └── roles/
+│   │       ├── GET    /
+│   │       ├── POST   /           # assign role to group
+│   │       └── DELETE /:rid
+│   │
+│   ├── roles/
+│   │   ├── GET    /               # list built-in + custom roles
+│   │   ├── POST   /               # create custom role
+│   │   ├── GET    /:id
+│   │   ├── PATCH  /:id
+│   │   ├── DELETE /:id            # custom only; blocked if still assigned
+│   │   └── permissions/
+│   │       ├── GET    /
+│   │       ├── PUT    /           # replace full permission set
+│   │       ├── POST   /           # add single permission
+│   │       └── DELETE /:pid
+│   │
+│   ├── permissions/
+│   │   └── GET    /               # enumerate all valid resource:action strings
+│   │
+│   └── audit/
+│       ├── GET    /               # paginated audit log
+│       └── GET    /stream         # SSE live audit stream
 ├── dns/
 │   ├── zones/
 │   │   ├── GET    /                  # list all zones
@@ -1303,7 +1357,148 @@ CREATE INDEX idx_dhcp_leases_scope    ON dhcp_leases(scope_id);
 | Zone authority trie + SOA table | <1 MB |
 | **Total RSS** | **~301 MB** |
 
-### 10.4 NetBox Integration Tables
+### 10.4 IAM Tables
+
+```sql
+-- User accounts. Passwords hashed with Argon2id.
+CREATE TABLE iam_users (
+    id                TEXT PRIMARY KEY,
+    username          TEXT NOT NULL UNIQUE,
+    display_name      TEXT NOT NULL DEFAULT '',
+    email             TEXT UNIQUE,
+    password_hash     TEXT,                  -- NULL for future SSO/OIDC accounts
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+    is_superadmin     BOOLEAN NOT NULL DEFAULT FALSE,
+    failed_attempts   INTEGER NOT NULL DEFAULT 0,
+    locked_until      TIMESTAMP,
+    password_changed  TIMESTAMP,
+    session_version   INTEGER NOT NULL DEFAULT 1,   -- increment to invalidate all sessions
+    last_login_at     TIMESTAMP,
+    last_login_ip     TEXT,
+    created_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_iam_users_username ON iam_users(username);
+
+-- Groups of users.
+CREATE TABLE iam_groups (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    is_system   BOOLEAN NOT NULL DEFAULT FALSE,  -- built-in groups cannot be deleted
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Group membership.
+CREATE TABLE iam_group_members (
+    group_id   TEXT NOT NULL REFERENCES iam_groups(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES iam_users(id)  ON DELETE CASCADE,
+    added_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+    added_by   TEXT REFERENCES iam_users(id),
+    PRIMARY KEY (group_id, user_id)
+);
+
+-- Roles (built-in and custom).
+CREATE TABLE iam_roles (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    is_builtin  BOOLEAN NOT NULL DEFAULT FALSE,  -- built-in roles cannot be deleted
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    created_by  TEXT REFERENCES iam_users(id)
+);
+
+-- Permissions assigned to a role.
+-- resource:action[:scope] triples.
+CREATE TABLE iam_role_permissions (
+    id          TEXT PRIMARY KEY,
+    role_id     TEXT NOT NULL REFERENCES iam_roles(id) ON DELETE CASCADE,
+    resource    TEXT NOT NULL,      -- e.g. 'dns_records'
+    action      TEXT NOT NULL,      -- e.g. 'create'
+    scope       TEXT DEFAULT 'all', -- 'own' | 'group' | 'all'
+    UNIQUE (role_id, resource, action, scope)
+);
+CREATE INDEX idx_iam_role_permissions_role ON iam_role_permissions(role_id);
+
+-- Roles assigned to groups.
+CREATE TABLE iam_group_roles (
+    group_id   TEXT NOT NULL REFERENCES iam_groups(id) ON DELETE CASCADE,
+    role_id    TEXT NOT NULL REFERENCES iam_roles(id)  ON DELETE CASCADE,
+    assigned_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    assigned_by TEXT REFERENCES iam_users(id),
+    PRIMARY KEY (group_id, role_id)
+);
+
+-- Direct permission grants/denies on individual users (override group permissions).
+CREATE TABLE iam_user_permissions (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
+    resource    TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    scope       TEXT DEFAULT 'all',
+    effect      TEXT NOT NULL DEFAULT 'allow',  -- 'allow' | 'deny'
+    reason      TEXT,
+    granted_by  TEXT REFERENCES iam_users(id),
+    expires_at  TIMESTAMP,
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, resource, action, scope)
+);
+CREATE INDEX idx_iam_user_permissions_user ON iam_user_permissions(user_id);
+
+-- API keys linked to users; inherit a subset of the user's permissions.
+CREATE TABLE iam_api_keys (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    key_hash        TEXT NOT NULL UNIQUE,    -- Argon2id hash of the raw key
+    key_prefix      TEXT NOT NULL,           -- first 8 chars displayed in UI
+    permissions     TEXT[],                  -- subset of owner's permissions; NULL = inherit all
+    allowed_cidrs   TEXT[],                  -- source IP allowlist; NULL = unrestricted
+    last_used_at    TIMESTAMP,
+    last_used_ip    TEXT,
+    expires_at      TIMESTAMP,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_iam_api_keys_user ON iam_api_keys(user_id);
+
+-- Refresh tokens (httpOnly cookie).
+CREATE TABLE iam_refresh_tokens (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES iam_users(id) ON DELETE CASCADE,
+    token_hash  TEXT NOT NULL UNIQUE,
+    issued_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at  TIMESTAMP NOT NULL,
+    revoked_at  TIMESTAMP,
+    user_agent  TEXT,
+    ip_address  TEXT
+);
+CREATE INDEX idx_iam_refresh_user ON iam_refresh_tokens(user_id);
+
+-- Append-only audit log for all mutating operations.
+CREATE TABLE iam_audit_log (
+    id            BIGSERIAL PRIMARY KEY,
+    ts            TIMESTAMP NOT NULL DEFAULT NOW(),
+    user_id       TEXT,
+    username      TEXT,
+    ip_address    TEXT,
+    session_id    TEXT,         -- JWT jti or API key id
+    method        TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    resource_type TEXT,
+    resource_id   TEXT,
+    action        TEXT,
+    before_state  JSONB,
+    after_state   JSONB,
+    outcome       TEXT NOT NULL, -- 'success' | 'forbidden' | 'error'
+    error_detail  TEXT
+) PARTITION BY RANGE (ts);
+CREATE INDEX idx_iam_audit_ts       ON iam_audit_log(ts DESC);
+CREATE INDEX idx_iam_audit_user     ON iam_audit_log(user_id, ts DESC);
+CREATE INDEX idx_iam_audit_resource ON iam_audit_log(resource_type, resource_id, ts DESC);
+```
+
+### 10.5 NetBox Integration Tables
 
 ```sql
 -- Singleton row holding all NetBox integration configuration.
@@ -2416,6 +2611,29 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] Helm chart additions: `Deployment/dnsdave-netbox`, `ConfigMap`, `Secret`
 - [ ] `dnsdave-netbox` multi-arch container image (amd64, arm64, arm/v7)
 
+### v0.8 – RBAC and Identity Management
+
+- [ ] `iam_users`, `iam_groups`, `iam_roles`, `iam_role_permissions`, `iam_group_members`, `iam_group_roles`, `iam_user_permissions`, `iam_api_keys`, `iam_refresh_tokens`, `iam_audit_log` Postgres tables
+- [ ] Argon2id password hashing (memory: 64 MB, time: 3, parallelism: 4)
+- [ ] JWT issuance (Ed25519 signing); 15-minute access token + 30-day refresh cookie
+- [ ] Effective permission computation on login (union of all group roles minus direct denies)
+- [ ] Session invalidation via `session_version` + NATS `dnsdave.iam.session_invalidated.{user_id}`
+- [ ] API key creation: Argon2id hash, prefix stored, permission subset enforced
+- [ ] API key source-IP CIDR restriction + expiry
+- [ ] In-process LRU permission cache for API key lookups (no per-request Postgres read)
+- [ ] `POST /api/v1/auth/login` with lockout after N failed attempts + unlock endpoint
+- [ ] `GET /api/v1/auth/me` returning effective permission set in JWT format
+- [ ] Full `/api/v1/iam/users`, `/groups`, `/roles`, `/permissions`, `/audit` REST API
+- [ ] Authorisation middleware: permission check on every handler; scope injection for `own`/`group`
+- [ ] `iam_audit_log` writer: every mutating call logged with before/after JSON diff
+- [ ] NATS `dnsdave.iam.audit` event on every auditable action (consumed by `dnsdave-log`, `dnsdave-export`)
+- [ ] Seven built-in roles pre-seeded (super_admin, admin, dns_admin, dhcp_admin, read_only, operator, netbox_sync)
+- [ ] Breached-password k-anonymity check (optional; enabled via config)
+- [ ] Direct permission grant/deny API (expiring, with reason field)
+- [ ] Audit log partitioned by day; configurable retention (default: 365 days)
+- [ ] UI: login page, permission store, `<Guard>` / `<GuardPage>` / `<GuardDisable>` components
+- [ ] UI: Users / Groups / Roles / Audit Log tabs with full matrix editor
+
 ### v1.0 – Multi-region
 - [ ] Multi-region anycast (BGP)
 - [ ] Postgres logical replication cross-region
@@ -3154,3 +3372,289 @@ These endpoints are served by `dnsdave-api` and are the primary interface for th
   }
 }
 ```
+
+---
+
+## 18. Identity, Access Management and RBAC
+
+DNSDave implements a first-class, fine-grained Role-Based Access Control (RBAC) system. Every UI action, every API call, and every automated integration is subject to permission evaluation. The system supports local users, groups, custom roles, and per-resource/per-action permission grants, with a complete audit trail.
+
+---
+
+### 18.1 Identity Model
+
+```
+User  ──────────────────────────────────────────┐
+  │  belongs to (0..n)                           │
+  ▼                                              │
+Group ──── assigned (0..n) ────► Role            │
+                                  │              │
+                                  │ consists of  │
+                                  ▼              │
+                             Permission          │
+                      { resource × action × scope } │
+                                                 │
+User ──── also holds direct (0..n) ────► Permission
+```
+
+- A **User** may belong to multiple **Groups**.
+- A **Group** may hold multiple **Roles**.
+- A **Role** is a named, reusable bundle of **Permissions**.
+- A **User** may also hold **Permissions** directly (grants or explicit denies), which take precedence over group-inherited permissions.
+- **Effective permissions** = union of all role permissions from all groups + direct grants, minus any direct denies.
+
+---
+
+### 18.2 Permission Model
+
+Each permission is a triple of **resource**, **action**, and **scope**.
+
+#### Resources
+
+| Resource key | Description |
+|---|---|
+| `dns_records` | Individual DNS resource records |
+| `dns_zones` | DNS zone management (SOA, NS, AXFR) |
+| `dns_upstreams` | Upstream resolver configuration |
+| `dns_forwardzones` | Conditional forward zones |
+| `dns_dnssec` | DNSSEC keys and signing |
+| `blocklists` | Blocklist sources and allow/block rules |
+| `dhcp_scopes` | DHCP scopes and options |
+| `dhcp_leases` | DHCP lease table (view only; leases are protocol-generated) |
+| `dhcp_reservations` | Static DHCP reservations |
+| `dhcp_options` | DHCP option sets |
+| `clients` | Client identity records |
+| `client_groups` | Client group membership and policies |
+| `query_log` | Query log read and export |
+| `analytics` | Statistics and dashboards |
+| `certificates` | TLS certificate management |
+| `cluster` | Cluster node management and NATS monitoring |
+| `settings` | Global system settings |
+| `integrations_netbox` | NetBox integration configuration and sync control |
+| `integrations_export` | Observability export configuration |
+| `iam_users` | User account management |
+| `iam_groups` | Group management |
+| `iam_roles` | Role definition and permission assignment |
+| `iam_audit` | Audit log read access |
+| `api_keys` | API key lifecycle for own or all accounts |
+
+#### Actions
+
+| Action | Description |
+|---|---|
+| `view` | Read any object in the resource |
+| `create` | Create new objects |
+| `edit` | Modify existing objects |
+| `delete` | Remove objects |
+| `bulk` | Bulk import / export operations |
+| `sync` | Trigger a sync or refresh (blocklists, NetBox, etc.) |
+| `flush` | Flush caches or force-rebuild indexes |
+| `export` | Download data (CSV, JSON, zone file, etc.) |
+| `rotate` | Rotate credentials (API keys, DNSSEC keys, TLS certs) |
+| `manage_members` | Add/remove members in a group |
+| `impersonate` | Act as another user (super-admin only) |
+
+#### Scopes
+
+| Scope | Description |
+|---|---|
+| `own` | Only objects the user created or owns |
+| `group` | Objects belonging to the user's groups |
+| `all` | All objects (unrestricted) |
+
+Scope is optional and defaults to `all` when not specified.
+
+#### Permission notation
+
+Permissions are expressed as `resource:action[:scope]` strings, e.g.:
+
+```
+dns_records:view                  # view all DNS records
+dns_records:create                # create DNS records
+dns_records:delete:own            # delete only records the user created
+dhcp_leases:view                  # read-only lease table
+iam_users:edit                    # manage other user accounts
+analytics:view                    # view dashboards
+query_log:export                  # download query log
+```
+
+---
+
+### 18.3 Built-in Roles
+
+Five built-in roles are pre-seeded and cannot be deleted (only customised by creating new roles):
+
+| Role | Description | Key permissions |
+|---|---|---|
+| `super_admin` | Unrestricted access to everything | `*:*` wildcard |
+| `admin` | Full operational access; cannot manage users/roles | All except `iam_*` |
+| `dns_admin` | Full DNS and blocklist management | `dns_*:*`, `blocklists:*` |
+| `dhcp_admin` | Full DHCP management, view DNS | `dhcp_*:*`, `dns_records:view`, `dns_zones:view` |
+| `read_only` | View-everything, change-nothing | `*:view` |
+| `operator` | Read + flush + sync, no config changes | `*:view`, `*.flush`, `*.sync`, `dhcp_leases:view` |
+| `netbox_sync` | Dedicated role for the NetBox service account | `integrations_netbox:*`, `dns_records:edit`, `dhcp_scopes:view` |
+
+---
+
+### 18.4 Authentication
+
+#### Local Users
+
+Local user accounts are stored in Postgres. Passwords are hashed with **Argon2id** (memory: 64 MB, time: 3, parallelism: 4). Password policy is configurable:
+
+- Minimum length (default: 12)
+- Complexity requirements (configurable per deployment)
+- Maximum age (default: never; configurable)
+- Lockout after N failed attempts (default: 10, 15-minute window)
+- Breached-password check via k-anonymity against HIBP (optional)
+
+#### Sessions and JWT
+
+On login (`POST /api/v1/auth/login`), the API issues:
+
+- A **short-lived JWT** (default: 15-minute expiry) signed with the server's Ed25519 private key, containing the user's identity and resolved effective permissions.
+- A **refresh token** (opaque, 30-day expiry, stored in an `HttpOnly; Secure; SameSite=Strict` cookie).
+
+The UI stores the JWT in memory only (never `localStorage`). On expiry, the SvelteKit SSR layer transparently exchanges the refresh cookie for a new JWT. The JWT payload:
+
+```json
+{
+  "sub": "user_01j...",
+  "username": "alice",
+  "display_name": "Alice Smith",
+  "groups": ["grp_ops", "grp_dns"],
+  "roles": ["dns_admin", "operator"],
+  "permissions": [
+    "dns_records:view",
+    "dns_records:create",
+    "dns_records:edit",
+    "dns_records:delete:own",
+    "blocklists:view",
+    "analytics:view"
+  ],
+  "iat": 1743840000,
+  "exp": 1743840900,
+  "iss": "dnsdave",
+  "jti": "tok_01j..."
+}
+```
+
+The `permissions` array is the **computed effective permission set** at login time. Any change to a user's roles or group membership invalidates all active sessions (via a `session_version` counter in Postgres and NATS `dnsdave.iam.session_invalidated.{user_id}` event that causes token re-validation on next request).
+
+#### API Keys
+
+API keys are linked to a user account and inherit a **subset** of that user's permissions (configured at key creation time). A key cannot be granted more permissions than its owner currently holds. Keys are:
+
+- Hashed with Argon2id at rest (the raw key is shown exactly once on creation).
+- Scoped to a named permission subset.
+- Optionally restricted to source IP CIDR.
+- Optionally time-limited (expiry date).
+- Individually revocable without affecting the parent user account.
+
+---
+
+### 18.5 Authorisation Enforcement
+
+Every `dnsdave-api` handler is protected by a composable middleware chain:
+
+```
+Request
+  │
+  ├─ 1. TLS termination
+  ├─ 2. Rate limit (per IP / per key)
+  ├─ 3. Authenticate (JWT or API key)
+  ├─ 4. Load effective permissions from JWT claims (or cached from Postgres if API key)
+  ├─ 5. Authorise: check permission(s) required by the handler
+  │       If denied → 403 Forbidden with body:
+  │       { "error": "forbidden", "required": "dns_records:create", "resource_id": "..." }
+  ├─ 6. Scope filter: if permission has scope=own, inject `WHERE created_by = user_id`
+  └─ 7. Handler logic
+```
+
+No handler bypasses the authorisation middleware. The permission check is a pure function on the JWT claims — no Postgres read per request (except for API key lookups, which are cached in a short-lived in-process LRU).
+
+---
+
+### 18.6 Audit Log
+
+Every mutating API call (POST, PUT, PATCH, DELETE) is written to the `iam_audit_log` table and published to the `dnsdave.iam.audit` NATS subject. Each entry records:
+
+- Timestamp, user ID, username, user IP
+- HTTP method, path, resource type, resource ID
+- Before-state and after-state (JSON diff for updates)
+- Outcome: `success` / `forbidden` / `error`
+- Session/key ID
+
+The audit log is append-only (no UPDATE or DELETE on the table). Retention is configurable (default: 365 days, enforced by a scheduled partition drop).
+
+---
+
+### 18.7 REST API for IAM
+
+```
+/api/v1/
+├── auth/
+│   ├── POST   /login              # password auth → JWT + refresh cookie
+│   ├── POST   /logout             # revoke refresh token
+│   ├── POST   /refresh            # exchange refresh cookie → new JWT
+│   ├── GET    /me                 # current user's profile + effective permissions
+│   └── PATCH  /me/password        # change own password
+│
+└── iam/
+    ├── users/
+    │   ├── GET    /               # paginated user list
+    │   ├── POST   /               # create user
+    │   ├── GET    /:id            # user detail
+    │   ├── PATCH  /:id            # update profile / status
+    │   ├── DELETE /:id            # deactivate (soft delete)
+    │   ├── POST   /:id/reset-password   # admin-initiated password reset
+    │   ├── POST   /:id/unlock           # unlock after lockout
+    │   ├── GET    /:id/sessions         # active sessions
+    │   ├── DELETE /:id/sessions         # revoke all sessions
+    │   ├── GET    /:id/permissions      # resolved effective permissions
+    │   └── api-keys/
+    │       ├── GET    /           # list user's API keys
+    │       ├── POST   /           # create API key (raw key shown once)
+    │       └── DELETE /:kid       # revoke API key
+    │
+    ├── groups/
+    │   ├── GET    /               # list groups
+    │   ├── POST   /               # create group
+    │   ├── GET    /:id            # group detail + member list
+    │   ├── PATCH  /:id            # update name / description
+    │   ├── DELETE /:id            # delete group (cannot delete system groups)
+    │   ├── GET    /:id/members    # list members
+    │   ├── POST   /:id/members    # add member(s) { user_ids: [...] }
+    │   ├── DELETE /:id/members/:uid    # remove member
+    │   ├── GET    /:id/roles      # roles assigned to group
+    │   ├── POST   /:id/roles      # assign role to group
+    │   └── DELETE /:id/roles/:rid      # remove role from group
+    │
+    ├── roles/
+    │   ├── GET    /               # list roles (built-in + custom)
+    │   ├── POST   /               # create custom role
+    │   ├── GET    /:id            # role detail + permission list
+    │   ├── PATCH  /:id            # update name / description (custom only)
+    │   ├── DELETE /:id            # delete role (custom only; blocked if assigned)
+    │   ├── GET    /:id/permissions     # list permissions
+    │   ├── PUT    /:id/permissions     # replace full permission set
+    │   ├── POST   /:id/permissions     # add individual permission
+    │   └── DELETE /:id/permissions/:pid   # remove permission
+    │
+    ├── permissions/
+    │   └── GET    /               # enumerate all valid resource:action combinations
+    │
+    └── audit/
+        ├── GET    /               # paginated audit log (filterable)
+        └── GET    /stream         # SSE live audit stream
+```
+
+---
+
+### 18.8 NATS IAM Events
+
+| Subject | Published by | Consumed by | Description |
+|---|---|---|---|
+| `dnsdave.iam.session_invalidated.{user_id}` | `dnsdave-api` | All API instances | Invalidate in-process permission cache on role/group change |
+| `dnsdave.iam.user_locked.{user_id}` | `dnsdave-api` | `dnsdave-ui` SSE | Notify admin console of lockout |
+| `dnsdave.iam.audit` | `dnsdave-api` | `dnsdave-log`, `dnsdave-export` | Stream audit events to log store and export backends |

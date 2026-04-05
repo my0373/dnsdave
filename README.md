@@ -185,7 +185,8 @@ All container images are published as **multi-arch manifests** – `docker pull`
 | Document | Description |
 |----------|-------------|
 | [`DESIGN.md`](DESIGN.md) | Full architecture and product design – goals, event bus, performance architecture, DNS features, DHCP, DNSSEC, certificates, API design, data model, deployment, observability, security, milestones, technology choices |
-| [`UI.md`](UI.md) | Web UI design specification – design system, all 12 pages, component catalogue, SSE data layer, responsive design, accessibility, keyboard shortcuts, API integration map |
+| [`UI.md`](UI.md) | Web UI design specification – design system, all 15 pages, component catalogue, SSE data layer, RBAC enforcement, responsive design, accessibility, keyboard shortcuts, API integration map |
+| [`MONITORING.md`](MONITORING.md) | Optional monitoring stack – Prometheus + Grafana + Loki + Alertmanager; 10 pre-built dashboards; 25+ alert rules; LogQL reference; Docker Compose and Kubernetes deployment |
 | [`TESTS.md`](TESTS.md) | Test specification – 150+ named unit, integration, and load tests across all components; milestone test gates; regression policy |
 | [`COMPARISON.md`](COMPARISON.md) | Competitive comparison against Pi-hole, AdGuard Home, Technitium, dnsmasq, CoreDNS, BIND9, PowerDNS, and Infoblox across 13 feature categories |
 | [`LIMITATIONS.md`](LIMITATIONS.md) | Frank account of what DNSDave does not do, will never do, and does differently – with specific comparisons against Pi-hole and major DDI solutions |

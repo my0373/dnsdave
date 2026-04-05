@@ -2053,7 +2053,31 @@ Every container exposes a Prometheus scrape endpoint. Grafana, VictoriaMetrics, 
 | `dnsdave_sync_duration_s` | Histogram | `list_id` |
 | `dnsdave_sync_errors_total` | Counter | `list_id` |
 
+**dnsdave-api** (`:8080/metrics`):
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `dnsdave_api_requests_total` | Counter | `method`, `path`, `status` |
+| `dnsdave_api_request_duration_ms` | Histogram | `method`, `path` |
+| `dnsdave_api_auth_failures_total` | Counter | `reason` |
+| `dnsdave_iam_lockouts_total` | Counter | - |
+| `dnsdave_api_active_sessions` | Gauge | - |
+| `dnsdave_api_ws_connections` | Gauge | - (active SSE streams) |
+| `dnsdave_tls_cert_expiry_seconds` | Gauge | `domain` |
+| `dnsdave_dns_affinity_resolution_total` | Counter | `result` (`matched`/`fallback`) |
+
+**dnsdave-export** (`:9096/metrics`):
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `dnsdave_export_events_total` | Counter | `backend`, `status` |
+| `dnsdave_export_event_latency_ms` | Histogram | `backend` |
+| `dnsdave_export_queue_depth` | Gauge | `backend` |
+| `dnsdave_export_backend_errors_total` | Counter | `backend`, `error` |
+
 NATS: built-in monitoring endpoint on `:8222/metrics` via `nats-surveyor`.
+
+> The complete metrics reference, Prometheus scrape configuration, alert rules, Grafana dashboard specifications, Loki configuration, and Kubernetes deployment instructions are documented in [`MONITORING.md`](MONITORING.md).
 
 ### 12.2 Structured Logging
 
@@ -2633,7 +2657,7 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] ZSK pre-publish rollover (automated via NATS KV key lifecycle)
 - [ ] `dnsdave.dnssec.*` NATS events; `DNSDAVE_DNSSEC` JetStream stream
 
-### v0.5 – Observability export
+### v0.5 – Observability export + monitoring stack
 
 - [ ] `dnsdave-export` container: NATS subscriber, fan-out to configured backends
 - [ ] Syslog backend (RFC 5424 + RFC 3164 + CEF) over UDP and TCP; rsyslog/syslog-ng compatible
@@ -2644,10 +2668,29 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] Elasticsearch bulk API backend
 - [ ] Splunk HEC backend
 - [ ] Generic HTTP webhook backend (JSON, NDJSON, CEF)
-- [ ] Pre-built Grafana dashboards in `deploy/grafana/dashboards/`
-- [ ] Pre-built Kibana dashboards in `deploy/kibana/`
-- [ ] Reference `docker-compose.grafana.yml` with Prometheus + Loki + Grafana + OTel Collector
 - [ ] `dnsdave-export` multi-arch container image (same targets as other containers)
+- [ ] **Monitoring stack** (`deploy/monitoring/`) – see `MONITORING.md`:
+  - [ ] `docker-compose.monitoring.yml` – Prometheus, Alertmanager, Loki, Promtail, Grafana, node-exporter, cAdvisor, postgres-exporter
+  - [ ] `docker-compose.monitoring.lite.yml` – reduced-resource profile for Raspberry Pi
+  - [ ] `deploy/monitoring/prometheus/prometheus.yml` – all scrape configs for every DNSDave container
+  - [ ] `deploy/monitoring/prometheus/rules/` – 5 alert rule files (dns, dhcp, blocklist, infrastructure, security) with 25+ alert definitions
+  - [ ] `deploy/monitoring/alertmanager/alertmanager.yml` – routing to email, Slack, PagerDuty, webhook
+  - [ ] `deploy/monitoring/loki/loki.yml` – Loki storage, 90-day retention, TSDB schema
+  - [ ] `deploy/monitoring/promtail/promtail.yml` – Docker log discovery + JSON pipeline
+  - [ ] `deploy/monitoring/grafana/provisioning/` – auto-provisioned data sources (Prometheus, Loki, optional Tempo) and dashboard provider
+  - [ ] `deploy/monitoring/grafana/dashboards/dns-overview.json` – NOC overview dashboard
+  - [ ] `deploy/monitoring/grafana/dashboards/dns-performance.json` – latency heatmap, percentiles, upstream health
+  - [ ] `deploy/monitoring/grafana/dashboards/dhcp.json` – pool gauges, lease lifecycle, NAK rate
+  - [ ] `deploy/monitoring/grafana/dashboards/blocklists.json` – domain counts, sync health
+  - [ ] `deploy/monitoring/grafana/dashboards/client-activity.json` – top clients, per-group stats
+  - [ ] `deploy/monitoring/grafana/dashboards/system-resources.json` – container CPU/memory, host OS, Postgres, NATS
+  - [ ] `deploy/monitoring/grafana/dashboards/cluster-health.json` – per-node QPS, NATS lag, leader indicator
+  - [ ] `deploy/monitoring/grafana/dashboards/netbox-sync.json` – push/pull rates, conflicts, lag
+  - [ ] `deploy/monitoring/grafana/dashboards/security-audit.json` – auth failures, lockouts, API key usage
+  - [ ] `deploy/monitoring/grafana/dashboards/query-log-explorer.json` – Loki-backed interactive log search
+  - [ ] Kubernetes: `ServiceMonitor` CRDs for all containers; `PrometheusRule` CRD; Grafana `ConfigMap` with sidecar import
+  - [ ] `deploy/k8s/monitoring/kube-prometheus-stack-values.yml` + `loki-values.yml`
+  - [ ] `deploy/monitoring/otel/otel-collector.yml` – optional OTel Collector pipeline for traces → Tempo
 
 ### v0.6 – DHCP
 - [ ] `dnsdave-dhcp`: DHCPv4 DORA state machine, scope management, static reservations

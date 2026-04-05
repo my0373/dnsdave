@@ -341,61 +341,256 @@ Keyboard navigation: `↑↓` to move, `Enter` to select, `Esc` to close.
 
 ### 6.2 Query Log
 
-**Purpose:** Full searchable, filterable, pausable live stream of every DNS query processed.
+**Purpose:** Full searchable, filterable, pausable live stream of every DNS query processed. Memory footprint is explicitly budgeted and enforced so the page cannot cause Chrome tab OOM regardless of query volume or how long it is left open.
 
 **Layout:**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  [● LIVE]  [⏸ Pause]  [⟳ Clear]    Showing 847 / 1,204 rows   │
-│  [Search domain...]  [Client ▼]  [Type ▼]  [Result ▼]  [Time ▼]│
+│  [● LIVE]  [⏸ Pause]  [⟳ Clear]    Showing 847 / 10,000 rows  │
+│  [Search domain or regex…] [Client ▼] [Type ▼] [Result ▼] [⋯]  │
+│  Active filters: result=BLOCK  client=192.168.1.50  [× Clear all]│
 ├──────────┬────────────────────┬──────┬────────┬──────────┬──────┤
 │ Time     │ Domain             │ Type │ Result │ Src      │  ms  │
 ├──────────┼────────────────────┼──────┼────────┼──────────┼──────┤
-│ 14:23:01 │ ads.google.com     │  A   │ BLOCK  │ blocklist│      │  ← red left border
-│ 14:23:01 │ server.home.arpa   │  A   │ PASS   │ local    │   0  │  ← violet
-│ 14:23:00 │ api.github.com     │  A   │ PASS   │ cache    │   0  │  ← cyan
-│ 14:23:00 │ example.com        │  A   │ PASS   │ upstream │  12  │  ← green
-│ 14:22:59 │ svc.corp.example   │  A   │ PASS   │ forward  │   8  │  ← indigo
+│ 14:23:01 │ ads.google.com     │  A   │ BLOCK  │ blocklist│   –  │← red left border
+│ 14:23:01 │ server.home.arpa   │  A   │ PASS   │ local    │   0  │← violet
+│ 14:23:00 │ api.github.com     │  A   │ PASS   │ cache    │   0  │← cyan
+│ 14:23:00 │ example.com        │  A   │ PASS   │ upstream │  12  │← green
+│ 14:22:59 │ svc.corp.example   │  A   │ PASS   │ forward  │   8  │← indigo
 └──────────┴────────────────────┴──────┴────────┴──────────┴──────┘
-│ [Export CSV]  [Export JSON]                          Page 1/47 ▶ │
+│ Buffer: 10,000 rows · 18.4 MB   [Export CSV]  [Export JSON]     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Full column set (configurable – drag to reorder, click eye to hide):**
+**Full column set (configurable – drag to reorder, click eye icon to hide):**
 
 | Column | Width | Notes |
 |--------|-------|-------|
-| Time | 90px | HH:mm:ss.SSS; hover shows full ISO timestamp |
-| Client IP | 120px | Clickable → filter to client |
+| Time | 90px | HH:mm:ss.SSS; hover shows full ISO timestamp in tooltip |
+| Client IP | 120px | Clickable → adds to client filter |
 | Client name | 140px | Resolved from `clients` table; greyed if unknown |
-| Domain | auto | Monospace; full FQDN; truncate to 2 lines |
+| Domain | auto | Monospace; full FQDN; filter-match highlighted |
 | Type | 52px | A / AAAA / CNAME / MX / TXT / PTR … |
 | Result | 80px | Coloured badge: PASS / BLOCK / NXDOMAIN / SERVFAIL |
 | Source | 80px | local / cache / upstream / forward / blocklist |
 | Upstream | 140px | Which upstream responded (if applicable) |
-| Latency | 56px | ms; `–` for cached/local |
-| DNSSEC | 48px | AD / – / FAIL |
+| Latency | 56px | µs or ms; `–` for cached/local |
+| DNSSEC | 48px | AD / – / FAIL badge |
 
-**Filter controls:**
-- **Domain search:** live regex filter (applied client-side to the in-memory buffer; server-side filter restarts the SSE subscription with `?q=` param)
-- **Client dropdown:** multi-select; searches IP and name
-- **Type:** multi-select checkbox list
-- **Result:** checkboxes for PASS / BLOCK / NXDOMAIN / SERVFAIL / ERROR
-- **Time range:** "Live" (default) / "Last 5m" / "Last 1h" / "Custom range" (date picker)
+---
 
-**Row detail drawer** (right slide-over, 480px, opens on row click):
-- Full query metadata
-- EDNS0 flags (DO, RD, CD bits)
-- Response: full RRset with TTL
-- RRSIG details (if DNSSEC)
-- Client group assignment
-- "Block this domain" / "Allow this domain" quick actions
-- "View all queries from this client" link
+#### 6.2.1 Filter System
 
-**Performance:** Virtualised list (svelte-virtual-list); maximum in-memory buffer 10,000 rows; overflow discards oldest. Export pulls paginated API, not the buffer.
+Filtering operates on **two tiers** that work together:
 
-**Data source:** SSE `/api/v1/dns/queries/stream`; history `GET /api/v1/dns/queries?q=&type=&result=&client=&from=&to=&page=&per_page=100`
+**Tier 1 – Server-side SSE parameters** (coarse-grained, reduces wire volume):
+
+The SSE subscription URL carries query parameters that are applied on the server before events are sent. Changing any of these restarts the SSE connection.
+
+| Parameter | Example | Effect |
+|-----------|---------|--------|
+| `q` | `q=ads.` | Server emits only events whose domain contains `ads.` |
+| `result` | `result=BLOCK` | Server emits only blocked queries |
+| `client` | `client=192.168.1.50` | Server emits only queries from this client |
+| `qtype` | `qtype=A,AAAA` | Server emits only A and AAAA queries |
+
+When all server-side parameters are clear, the full stream is received and all filtering is done in the browser.
+
+**Tier 2 – Client-side filter (in Web Worker, zero main-thread cost):**
+
+Applied to the in-memory ring buffer without restarting the stream. Changes are debounced at 150 ms; results are sent back to the main thread as a compact index array (not the full rows).
+
+| Control | Type | Client-side only |
+|---------|------|-----------------|
+| Domain search | Text – plain substring or `/regex/` | Yes |
+| Client multi-select | Dropdown, searches IP and hostname | Partially – triggers SSE restart only when the server param set changes |
+| Type checkboxes | A / AAAA / CNAME / MX / TXT / PTR / other | Yes |
+| Result checkboxes | PASS / BLOCK / NXDOMAIN / SERVFAIL / ERROR | Yes |
+| Source checkboxes | local / cache / upstream / forward / blocklist | Yes |
+| Min latency | Number input (µs) | Yes |
+| Time range | Live / Last 5m / Last 1h / Custom | Live = client-side; historical = history API |
+| DNSSEC status | AD / no-AD / FAIL | Yes |
+
+**Filter URL state:** all active filter values are written to the URL query string (`?q=&result=&client=…`) on every change so that the browser's back button and copy-URL restore the same view.
+
+**Filter presets:** up to 10 named filter combinations can be saved to `localStorage` (key: `dnsdave.log.presets`). A `[☆ Save preset]` button appears when any filter is active. Presets are listed in a dropdown next to the filter bar.
+
+**Active filter chips:** each active filter renders as a dismissible chip below the filter bar (as shown in the layout). Clicking a chip removes that filter.
+
+**Filter match highlighting:** when a domain text filter is active, the matched portion of the domain string is highlighted with a `<mark>` element styled in the theme's accent colour. Regex matches highlight each capture group.
+
+---
+
+#### 6.2.2 Memory Architecture
+
+The log viewer is the highest-throughput component in the UI. At 10,000 QPS sustained (a realistic busy home lab or small office), the naive approach of pushing objects into a reactive Svelte store would cause continuous GC pressure, main-thread jank, and memory growth until Chrome kills the tab.
+
+**Design goals:**
+- Hard memory cap: ≤ 25 MB for the log buffer regardless of query volume or session length.
+- Main thread never touches raw log data – only the filtered visible slice.
+- Zero allocations per incoming event on the hot path (object pool reuse).
+- Chrome `performance.memory.usedJSHeapSize` stays flat when the buffer is full.
+
+**Implementation – Shared Ring Buffer in a Web Worker:**
+
+```
+┌─ Main Thread (SvelteKit page) ──────────────────────────────────┐
+│                                                                   │
+│   <LogViewer>                                                     │
+│      ↕ postMessage (FilterSpec)          ↑ postMessage           │
+│      ↓                                   (FilterResult)          │
+│   svelte-virtual-list  ←── visible rows slice (index array) ─────┤
+│      renders only ~30 visible rows                               │
+└──────────────────────────────────────────────────────────────────┘
+          ↑ SSE text events (raw JSON strings)
+          │
+┌─ log.worker.ts (Dedicated Worker) ──────────────────────────────┐
+│                                                                   │
+│  Ring Buffer (pre-allocated):                                     │
+│    rows[0..9999] – object pool, slot reused oldest-first         │
+│    head: number   – write pointer                                 │
+│    size: number   – current fill level                           │
+│                                                                   │
+│  On SSE event:                                                    │
+│    1. Parse JSON into next pool slot (reuse object, no alloc)    │
+│    2. Advance head pointer                                        │
+│    3. Re-apply current FilterSpec to affected window             │
+│    4. If new row passes filter: append its index to visibleIdx[] │
+│    5. postMessage({ type: 'append', indices: [i], stats })       │
+│       (only if main thread is not already pending a render)      │
+│                                                                   │
+│  On FilterSpec change (from main thread):                        │
+│    1. Full scan of ring buffer (max 10,000 iterations)           │
+│    2. Compile regex once before scan                             │
+│    3. Build visibleIdx[] (Uint16Array – compact, transferable)   │
+│    4. postMessage({ type: 'filter', indices: Uint16Array },      │
+│                   [indices.buffer])   ← Transferable, zero-copy  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Ring buffer pre-allocation:**
+
+The worker allocates all 10,000 row objects at startup and reuses them in a circular pattern. When the buffer is full, the oldest slot is overwritten in-place – no allocation, no GC.
+
+```typescript
+// log.worker.ts (illustrative)
+const CAPACITY = 10_000;
+const pool: LogRow[] = Array.from({ length: CAPACITY }, () => ({} as LogRow));
+let head = 0;
+let size = 0;
+
+function ingest(raw: string): void {
+  const slot = head % CAPACITY;
+  const obj = pool[slot];
+  // Assign fields in-place – reuse the object; no `new`
+  const parsed = JSON.parse(raw);
+  obj.ts = parsed.ts;
+  obj.domain = parsed.domain;
+  obj.qtype = parsed.qtype;
+  obj.result = parsed.result;
+  obj.client = parsed.client;
+  obj.source = parsed.source;
+  obj.latency_us = parsed.latency_us;
+  obj.dnssec_ad = parsed.dnssec_ad;
+  head = (head + 1) % CAPACITY;
+  if (size < CAPACITY) size++;
+}
+```
+
+**Memory budget:**
+
+| Item | Budget |
+|------|--------|
+| Ring buffer (10,000 pre-allocated row objects) | ≤ 12 MB |
+| Visible index array (`Uint16Array`, max 10,000 × 2 bytes) | 20 KB |
+| DOM nodes (svelte-virtual-list renders ~30 rows) | ≤ 2 MB |
+| Filter state, presets, misc | < 1 MB |
+| **Total budget** | **≤ 25 MB** |
+
+The status bar displays live `buffer: N rows · X.X MB` to make the budget visible to the user. The MB figure is an estimate: `size × avgRowBytes` where `avgRowBytes` is sampled from the last 100 ingest events.
+
+**When the buffer is full:** oldest rows are silently overwritten. The status bar shows `● 10,000 rows (ring full)`. No alert, no pause – the viewer simply becomes a sliding window.
+
+**Pausing:** when the user clicks `⏸ Pause`, the worker stops updating `visibleIdx` and stops posting messages. Incoming SSE events still fill the ring buffer in the worker (so nothing is lost), but the main thread view freezes. On resume, the worker posts a full `filter` result immediately.
+
+**Tab visibility:** an `IntersectionObserver` on the log viewer container detects when it scrolls off-screen; a `visibilitychange` listener detects when the browser tab is hidden. In both cases, the worker reduces its postMessage rate to 1 update/second (instead of per-event) to avoid waking the main thread unnecessarily.
+
+---
+
+#### 6.2.3 Virtual Scroll
+
+`svelte-virtual-list` renders only the visible viewport rows – typically 25–35 rows at 36px row height in a 1080p window. The list is fed the `visibleIdx[]` array (indices into the ring buffer) and reads row data on demand:
+
+```svelte
+<!-- LogViewer.svelte (illustrative) -->
+<VirtualList
+  items={$visibleIndices}
+  itemHeight={36}
+  let:item={idx}
+>
+  <LogRow row={worker.getRow(idx)} filter={$activeFilter} />
+</VirtualList>
+```
+
+The `getRow(idx)` call reads a value from the shared pool that the worker has already written. Because the worker holds the pool and the main thread only reads indices, there is no serialisation overhead for rows that are not currently visible.
+
+**Row height:** fixed at 36px (single-line mode, default). An optional "expanded" mode shows the domain on two lines (52px) for very long FQDNs. The height toggle is global for the current session and stored in `localStorage`.
+
+**Scroll behaviour:**
+- **Live mode (default):** the list auto-scrolls to top (newest) on each update. A `↓ N new rows` toast appears if the user has manually scrolled away from the top; clicking it snaps back.
+- **Paused / filtered mode:** scroll position is preserved.
+- **Keyboard:** `↑` / `↓` navigate rows; `Enter` opens the detail drawer for the focused row; `Esc` closes the drawer.
+
+---
+
+#### 6.2.4 Row Detail Drawer
+
+Opens as a right-side slide-over (480px wide) when a row is clicked. The drawer reads the full row from the ring buffer by index – the pool object is still valid because the drawer is closed before the slot could be reused (a 10,000-row buffer at 1,000 QPS gives ~10 seconds before a slot is recycled; the drawer includes a `⚠ This entry has been recycled` warning if the slot was overwritten whilst the drawer was open).
+
+**Drawer content:**
+
+```
+┌─ Query Detail ──────────────────────────────────────── [×] ───┐
+│  ads.google.com                         14:23:01.842           │
+│  ─────────────────────────────────────────────────────────     │
+│  Client     192.168.1.50  (mylaptop)   Group: default          │
+│  Result     ● BLOCKED                  Source: blocklist       │
+│  Type        A                         Latency: –              │
+│  DNSSEC      –                                                  │
+│                                                                 │
+│  EDNS0 Flags    RD=1  DO=0  CD=0  AD=0                        │
+│                                                                 │
+│  Response    NXDOMAIN (synthesised)                            │
+│                                                                 │
+│  Blocklist match                                                │
+│    List: StevenBlack hosts (updated 3h ago)                    │
+│    Rule: ads.google.com                                         │
+│                                                                 │
+│  ─────────────────────────────────────────────────────────     │
+│  [✓ Allow this domain]   [⛔ Re-block]   [View client history] │
+└───────────────────────────────────────────────────────────────┘
+```
+
+For upstream/forward results, the drawer additionally shows the full RRset with TTL and (if DNSSEC) the RRSIG record.
+
+---
+
+#### 6.2.5 Export
+
+Export always pulls from the **history API** (paginated), never from the in-memory ring buffer, so it is not limited to the 10,000-row window.
+
+| Format | Endpoint | Notes |
+|--------|----------|-------|
+| CSV | `GET /api/v1/dns/queries?format=csv&…` | Streamed; `Content-Disposition: attachment` |
+| JSON (NDJSON) | `GET /api/v1/dns/queries?format=ndjson&…` | One JSON object per line |
+| JSON (array) | `GET /api/v1/dns/queries?format=json&…` | Full array; limited to 100,000 rows |
+
+All active filters are forwarded as query parameters in the export request so that "Export CSV" exports only what is currently visible.
+
+**Data source:**
+- Live view: SSE `/api/v1/dns/queries/stream?q=&result=&client=&qtype=`
+- History view: `GET /api/v1/dns/queries?q=&result=&client=&qtype=&from=&to=&page=&per_page=200`
 
 ---
 
@@ -857,17 +1052,83 @@ Props: records: DnsRecord[]
 
 Full DNS record table with inline editing, bulk selection, and virtual scrolling. Handles optimistic updates with rollback on error.
 
-### 7.6 `LiveFeed`
+### 7.6 `LogViewer`
 
-```
-Props: stream: string           (SSE endpoint URL)
-       maxRows?: number         (default 500)
-       columns: ColumnDef[]
-       rowColor: (row) => string
-       onRowClick?: (row) => void
+The primary full-featured log component used on the Query Log page. All heavy lifting (ring buffer, filtering, indexing) happens off-main-thread in `log.worker.ts`.
+
+```typescript
+// Props
+interface LogViewerProps {
+  stream:        string;          // SSE endpoint base URL
+  historyUrl:    string;          // paginated history API URL
+  columns?:      ColumnDef[];     // override visible columns
+  capacity?:     number;          // ring buffer size; default 10_000
+  rowHeight?:    number;          // px; default 36
+  initialFilter?: FilterSpec;     // applied on mount (from URL params)
+  onRowClick?:   (row: LogRow) => void;
+}
+
+// FilterSpec – serialisable; written to URL query string
+interface FilterSpec {
+  q?:            string;    // plain substring or /regex/
+  result?:       string[];  // e.g. ['BLOCK', 'NXDOMAIN']
+  client?:       string[];
+  qtype?:        string[];
+  source?:       string[];
+  minLatencyUs?: number;
+  dnssec?:       'ad' | 'fail' | 'none';
+}
+
+// Worker message protocol
+type WorkerIn =
+  | { type: 'event';  raw: string }         // raw SSE JSON string
+  | { type: 'filter'; spec: FilterSpec }    // new filter from UI
+  | { type: 'pause' }
+  | { type: 'resume' }
+  | { type: 'clear' };
+
+type WorkerOut =
+  | { type: 'append'; indices: Uint16Array; stats: BufferStats }
+  | { type: 'filter'; indices: Uint16Array; stats: BufferStats }
+  | { type: 'stats';  stats: BufferStats };
+
+interface BufferStats {
+  total:       number;  // rows in ring buffer
+  visible:     number;  // rows matching current filter
+  estimatedMb: number;  // live memory estimate
+  full:        boolean; // ring buffer at capacity
+}
 ```
 
-Reusable SSE-backed live table. Manages connection lifecycle, reconnection with exponential back-off, and pause/resume. Used for Query Log and DHCP Lease Events.
+**Behaviour:**
+
+- On mount: spawns `log.worker.ts`, opens SSE connection via SvelteKit server-side proxy, forwards each raw event string to the worker via `postMessage`.
+- On `WorkerOut.append`: appends new visible indices to the displayed slice; auto-scrolls to top if in live mode.
+- On `WorkerOut.filter`: replaces `visibleIndices` entirely with the new `Uint16Array` (zero-copy, transferred ownership).
+- On unmount: terminates the worker and closes the SSE connection. The ring buffer is discarded with it – no lingering memory.
+- Exposes `pause()`, `resume()`, `clear()`, and `updateFilter(spec)` via a Svelte `bind:this`.
+
+**`log.worker.ts` responsibilities:**
+
+- Maintains the pre-allocated ring buffer (object pool, no GC-triggering allocations on the hot path).
+- Compiles `FilterSpec.q` into a `RegExp` once per filter change; caches it.
+- On a full filter scan (10,000 iterations max): builds a `Uint16Array` of matching indices and transfers it to the main thread with zero-copy (`postMessage(msg, [msg.indices.buffer])`).
+- On each new ingest: checks only the new row against the current filter; appends its index if it matches – no full rescan needed.
+- Debounces filter re-scans at 150 ms when multiple `filter` messages arrive in quick succession (e.g., user typing).
+- Emits a `stats` message every 2 seconds (not per-event) for the status bar.
+
+**`MiniLogFeed` (lightweight variant):** used on the Dashboard for the 5-row live query preview. Uses the same worker protocol but with `capacity: 500` and no filter controls.
+
+#### 7.6.1 `MiniLogFeed`
+
+```typescript
+interface MiniLogFeedProps {
+  maxRows?:   number;   // default 5 (display); buffer 500
+  onViewAll?: () => void;
+}
+```
+
+Lightweight live preview. Shares the same `log.worker.ts` module but with a 500-row capacity. Clicking a row navigates to the full Query Log filtered to that client. "View all" navigates to an unfiltered Query Log.
 
 ### 7.7 `NodeCard`
 
@@ -902,45 +1163,195 @@ Right-side slide-over panel. Used universally for record detail, zone detail, cl
 
 ## 8. Real-time Data Layer
 
-All SSE connections are managed by a central `LiveStore` pattern in Svelte:
+### 8.1 Architecture Overview
+
+The UI uses **two distinct real-time patterns**, chosen based on throughput:
+
+| Stream | Volume | Pattern | Rationale |
+|--------|--------|---------|-----------|
+| DNS query log | Up to 10,000/s | Web Worker + ring buffer | Main-thread isolation; zero GC pressure |
+| DHCP lease events | < 10/s | Lightweight `LiveStore` | Low volume; main-thread reactive store is fine |
+| System events | < 1/s | Lightweight `LiveStore` | Low volume; drives notifications |
+| Zone serial updates | < 1/s | Lightweight `LiveStore` | Low volume; drives zone list badge |
+
+### 8.2 DNS Query Log – Web Worker Pattern
+
+The query log stream bypasses Svelte's reactive store entirely. Raw SSE event strings are forwarded to `log.worker.ts` without parsing on the main thread.
+
+```
+SSE connection (SvelteKit proxy)
+    │  raw JSON strings
+    ▼
+log.worker.ts (Dedicated Worker – separate V8 heap)
+    │  pre-allocated ring buffer (10,000 slots)
+    │  FilterSpec applied here
+    │  Uint16Array of matching indices
+    │  postMessage(..., [transferable])   ← zero-copy
+    ▼
+LogViewer.svelte (main thread)
+    │  stores only the Uint16Array (20 KB max)
+    │  reads row data from worker on demand via getRow(idx)
+    ▼
+svelte-virtual-list
+    │  renders ~30 DOM rows at any time
+    ▼
+Chrome tab heap
+```
+
+**Why this pattern keeps Chrome memory low:**
+
+1. The ring buffer lives in the worker's V8 heap, not the main thread's. Chrome's "Memory" DevTools tab shows the main tab heap stays small.
+2. The main thread only ever holds a `Uint16Array` of at most 20 KB (10,000 × 2 bytes). It never holds parsed log row objects.
+3. `svelte-virtual-list` recycles DOM nodes – only ~30 nodes exist regardless of buffer size.
+4. Transferring the `Uint16Array` with `Transferable` semantics moves ownership to the main thread at zero copy cost; the worker immediately receives a new buffer to write into.
+5. No array spread (`[item, ...rows]`) on the hot path – the ring buffer is mutated in-place.
+
+**SSE proxy route** (`src/routes/api/stream/+server.ts`):
+
+All SSE connections are proxied through SvelteKit's server-side routes. This has two benefits: the API key is never exposed in browser network tabs (it is added server-side), and the SvelteKit edge can add gzip compression to the event stream.
 
 ```typescript
-// src/lib/stores/live.ts
-function createLiveStore<T>(endpoint: string, maxBuffer = 500) {
-  const { subscribe, update } = writable<T[]>([]);
-  let source: EventSource | null = null;
-  let paused = false;
+// src/routes/api/stream/queries/+server.ts
+export async function GET({ url, locals }) {
+  const upstream = new URL('/api/v1/dns/queries/stream', DNSDAVE_API_URL);
+  url.searchParams.forEach((v, k) => upstream.searchParams.set(k, v));
 
-  function connect() {
-    source = new EventSource(endpoint, { withCredentials: true });
-    source.onmessage = (e) => {
-      if (paused) return;
-      const item = JSON.parse(e.data) as T;
-      update(rows => [item, ...rows].slice(0, maxBuffer));
-    };
-    source.onerror = () => {
-      source?.close();
-      setTimeout(connect, exponentialBackoff());  // max 30s
-    };
-  }
+  const res = await fetch(upstream, {
+    headers: { 'Authorization': `Bearer ${locals.apiKey}` }
+  });
 
-  return { subscribe, connect, pause: () => paused = true,
-           resume: () => paused = false, disconnect: () => source?.close() };
+  return new Response(res.body, {
+    headers: {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'X-Accel-Buffering': 'no',
+    }
+  });
 }
 ```
 
-**SSE endpoints consumed by the UI:**
+**Worker lifecycle:**
 
-| Store | Endpoint | Consumer pages |
-|-------|----------|---------------|
-| `queryStream` | `/api/v1/dns/queries/stream` | Dashboard, Query Log |
-| `dhcpLeaseStream` | `/api/v1/dhcp/leases/stream` | Dashboard, DHCP Leases |
-| `systemEvents` | `/api/v1/system/events/stream` | Notification drawer, Cluster |
-| `zoneEvents` | `/api/v1/dns/zones/events/stream` | Zones page (serial updates) |
+```typescript
+// src/lib/log-worker-bridge.ts
+export class LogWorkerBridge {
+  private worker: Worker;
+  private source: EventSource | null = null;
 
-**Reconnection strategy:** exponential back-off starting at 1s, cap at 30s, jitter ±500ms. While disconnected, a `● Reconnecting…` badge replaces the `● LIVE` indicator.
+  constructor(private endpoint: string) {
+    this.worker = new Worker(
+      new URL('./log.worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+  }
 
-**Auth:** All SSE requests include `Authorization: Bearer <key>` via a server-side proxy route (`/api/stream/*`) in SvelteKit to avoid exposing the API key in browser network tabs.
+  connect(params: Record<string, string>) {
+    const url = new URL(this.endpoint, location.origin);
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+
+    this.source = new EventSource(url.toString());
+    this.source.onmessage = (e) => {
+      // Forward raw string – no JSON.parse on main thread
+      this.worker.postMessage({ type: 'event', raw: e.data });
+    };
+    this.source.onerror = () => this.reconnect();
+  }
+
+  applyFilter(spec: FilterSpec) {
+    this.worker.postMessage({ type: 'filter', spec });
+  }
+
+  onMessage(handler: (msg: WorkerOut) => void) {
+    this.worker.onmessage = (e) => handler(e.data);
+  }
+
+  destroy() {
+    this.source?.close();
+    this.worker.terminate();   // frees ring buffer heap immediately
+  }
+
+  private reconnect() {
+    this.source?.close();
+    const delay = Math.min(30_000, exponentialBackoff() + jitter());
+    setTimeout(() => this.connect(this.lastParams), delay);
+  }
+}
+```
+
+### 8.3 Lightweight `LiveStore` (Low-volume Streams)
+
+For DHCP, system events, and zone updates – all of which arrive at fewer than 10 events per second – a simple reactive store is appropriate. The key fix over a naïve implementation is using a **fixed-size circular array** rather than spread-and-slice:
+
+```typescript
+// src/lib/stores/live.ts
+export function createLiveStore<T>(endpoint: string, capacity = 500) {
+  const buffer: T[] = new Array(capacity);
+  let head = 0;
+  let size = 0;
+  const { subscribe, set } = writable<T[]>([]);
+  let source: EventSource | null = null;
+  let paused = false;
+  let snapshotDirty = false;
+
+  function flush() {
+    if (!snapshotDirty) return;
+    snapshotDirty = false;
+    // Build ordered snapshot without spread – reuse slice
+    const snap = size < capacity
+      ? buffer.slice(0, size).reverse()
+      : [...buffer.slice(head), ...buffer.slice(0, head)].reverse();
+    set(snap);
+  }
+
+  function connect() {
+    source = new EventSource(endpoint);
+    source.onmessage = (e) => {
+      if (paused) return;
+      buffer[head % capacity] = JSON.parse(e.data) as T;
+      head = (head + 1) % capacity;
+      if (size < capacity) size++;
+      snapshotDirty = true;
+      requestAnimationFrame(flush);   // batch to one DOM update per frame
+    };
+    source.onerror = () => {
+      source?.close();
+      setTimeout(connect, Math.min(30_000, exponentialBackoff()));
+    };
+  }
+
+  return {
+    subscribe,
+    connect,
+    pause:      () => { paused = true; },
+    resume:     () => { paused = false; },
+    disconnect: () => source?.close(),
+  };
+}
+```
+
+**Key properties:**
+- `requestAnimationFrame(flush)` batches Svelte store updates to one per frame – no matter how fast events arrive, the DOM updates at most 60 times/second.
+- The snapshot copy is built once per frame, not once per event.
+- `paused = true` drops incoming events from the store but the SSE connection stays open (no reconnect needed on resume).
+
+### 8.4 SSE Endpoints
+
+| Store / component | Proxy route | Upstream endpoint | Consumer pages |
+|---|---|---|---|
+| `LogWorkerBridge` | `/api/stream/queries` | `/api/v1/dns/queries/stream` | Dashboard (mini), Query Log |
+| `dhcpLeaseStore` | `/api/stream/dhcp/leases` | `/api/v1/dhcp/leases/stream` | Dashboard, DHCP Leases |
+| `systemEventStore` | `/api/stream/system` | `/api/v1/system/events/stream` | Notification drawer, Cluster |
+| `zoneEventStore` | `/api/stream/zones` | `/api/v1/dns/zones/events/stream` | Zones page |
+
+### 8.5 Connection Status
+
+A global `connectionStore` tracks the health of every SSE connection:
+
+```typescript
+type ConnectionState = 'live' | 'reconnecting' | 'paused' | 'disconnected';
+```
+
+The top bar `● LIVE` indicator reflects the **worst** state across all active connections. Individual page headers show per-stream state. Whilst reconnecting, the last known data remains visible – it is never cleared on disconnect.
 
 ---
 

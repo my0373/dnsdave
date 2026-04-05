@@ -1022,6 +1022,22 @@ struct LeaseEvent {
 │   ├── GET    /top-domains
 │   ├── GET    /top-blocked
 │   └── GET    /clients
+├── devices/
+│   ├── GET    /               # list all devices (paginated, filterable by type/tag/zone)
+│   ├── POST   /               # create device with interfaces + addresses
+│   ├── GET    /:id            # device detail + interfaces + addresses + lease status
+│   ├── PATCH  /:id            # update device metadata / naming strategy
+│   ├── DELETE /:id            # delete device + all reservations and DNS records
+│   ├── POST   /:id/interfaces            # add interface to device
+│   ├── PATCH  /:id/interfaces/:iface_id  # update interface (MAC, alias, VLAN)
+│   ├── DELETE /:id/interfaces/:iface_id  # remove interface + its addresses
+│   ├── POST   /:id/interfaces/:iface_id/addresses        # add address to interface
+│   ├── PATCH  /:id/interfaces/:iface_id/addresses/:aid   # update address
+│   ├── DELETE /:id/interfaces/:iface_id/addresses/:aid   # remove address
+│   ├── GET    /:id/dns        # all DNS records associated with this device
+│   ├── GET    /:id/leases     # active DHCP leases for all interfaces
+│   └── POST   /from-lease     # promote lease to device + reservation
+│
 ├── integrations/
 │   └── netbox/
 │       ├── GET    /config
@@ -1357,7 +1373,74 @@ CREATE INDEX idx_dhcp_leases_scope    ON dhcp_leases(scope_id);
 | Zone authority trie + SOA table | <1 MB |
 | **Total RSS** | **~301 MB** |
 
-### 10.4 IAM Tables
+### 10.4 Device Model Tables
+
+```sql
+-- Top-level device record.
+CREATE TABLE devices (
+    id               TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    display_name     TEXT,
+    device_type      TEXT NOT NULL DEFAULT 'host',
+    description      TEXT,
+    tags             TEXT[] DEFAULT '{}',
+    dns_zone         TEXT REFERENCES dns_zones(name) ON DELETE SET NULL,
+    naming_strategy  TEXT NOT NULL DEFAULT 'affinity',
+    canonical_name   TEXT,         -- FQDN; auto-derived from name + dns_zone if NULL
+    netbox_id        INTEGER,
+    created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_devices_name     ON devices(name);
+CREATE INDEX idx_devices_netbox   ON devices(netbox_id) WHERE netbox_id IS NOT NULL;
+
+-- Network interfaces on a device.
+CREATE TABLE device_interfaces (
+    id              TEXT PRIMARY KEY,
+    device_id       TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,           -- 'eth0', 'em0', 'bond0', 'wlan0'
+    mac_address     MACADDR,
+    interface_type  TEXT NOT NULL DEFAULT 'ethernet',
+    vlan_id         INTEGER,
+    mtu             INTEGER,
+    description     TEXT,
+    dns_alias       TEXT,                    -- short name; becomes alias FQDN
+    is_primary      BOOLEAN NOT NULL DEFAULT FALSE,
+    netbox_iface_id INTEGER,
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (device_id, name),
+    -- Only one primary interface per device.
+    EXCLUDE USING btree (device_id WITH =) WHERE (is_primary)
+);
+CREATE INDEX idx_device_ifaces_device ON device_interfaces(device_id);
+CREATE INDEX idx_device_ifaces_mac    ON device_interfaces(mac_address)
+    WHERE mac_address IS NOT NULL;
+
+-- IP addresses on an interface. Each address may optionally link to
+-- a DHCP reservation and/or a DNS record.
+CREATE TABLE device_interface_addresses (
+    id               TEXT PRIMARY KEY,
+    interface_id     TEXT NOT NULL REFERENCES device_interfaces(id) ON DELETE CASCADE,
+    address          INET NOT NULL,         -- IP with prefix length
+    address_type     TEXT NOT NULL DEFAULT 'primary',  -- 'primary' | 'secondary' | 'vip' | 'anycast'
+    is_primary       BOOLEAN NOT NULL DEFAULT FALSE,
+    is_dhcp          BOOLEAN NOT NULL DEFAULT FALSE,    -- true = dynamically leased
+    scope_id         TEXT REFERENCES dhcp_scopes(id)   ON DELETE SET NULL,
+    reservation_id   TEXT REFERENCES dhcp_reservations(id) ON DELETE SET NULL,
+    dns_record_id    TEXT REFERENCES dns_records(id)   ON DELETE SET NULL,
+    dns_alias        TEXT,                  -- per-address alias name (e.g. 'vip')
+    netbox_ip_id     INTEGER,
+    created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (interface_id, address)
+);
+CREATE INDEX idx_dia_interface  ON device_interface_addresses(interface_id);
+CREATE INDEX idx_dia_scope      ON device_interface_addresses(scope_id)
+    WHERE scope_id IS NOT NULL;
+CREATE INDEX idx_dia_reservation ON device_interface_addresses(reservation_id)
+    WHERE reservation_id IS NOT NULL;
+```
+
+### 10.5 IAM Tables
 
 ```sql
 -- User accounts. Passwords hashed with Argon2id.
@@ -1498,7 +1581,7 @@ CREATE INDEX idx_iam_audit_user     ON iam_audit_log(user_id, ts DESC);
 CREATE INDEX idx_iam_audit_resource ON iam_audit_log(resource_type, resource_id, ts DESC);
 ```
 
-### 10.5 NetBox Integration Tables
+### 10.6 NetBox Integration Tables
 
 ```sql
 -- Singleton row holding all NetBox integration configuration.
@@ -2634,6 +2717,28 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] UI: login page, permission store, `<Guard>` / `<GuardPage>` / `<GuardDisable>` components
 - [ ] UI: Users / Groups / Roles / Audit Log tabs with full matrix editor
 
+### v0.9 – Multi-Homed Devices and Networks
+
+- [ ] `devices`, `device_interfaces`, `device_interface_addresses` Postgres tables
+- [ ] `POST /api/v1/devices` – create device with N interfaces and M addresses per interface; atomically creates DHCP reservations and DNS records
+- [ ] `POST /api/v1/devices/from-lease` – promote an existing dynamic lease to a static device + reservation
+- [ ] `PATCH /api/v1/devices/:id/interfaces/:iface_id` – update interface MAC, alias, VLAN; hot-patches in-memory affinity table via NATS
+- [ ] Network-affinity DNS resolution in `dnsdave-dns` hot path: `ArcSwap<Vec<(IpNet, Vec<RData>)>>` affinity table; ≤ 200 ns overhead per query
+- [ ] Naming strategies: `round_robin`, `affinity`, `primary_only`, `per_interface`, `explicit`
+- [ ] Per-interface DNS alias generation (auto and manual)
+- [ ] PTR record auto-creation for all device interface addresses
+- [ ] RFC 2136 DNS UPDATE scoped to individual interface records
+- [ ] Multi-reservation device linking: `device_interfaces.mac_address` → `dhcp_reservations`
+- [ ] Lease correlation: `dnsdave.dhcp.lease.*` events carry `device_id` + `interface_id`
+- [ ] Option 82 (agent circuit ID + remote ID) parsed, logged, available as scope-selection hint
+- [ ] VLAN ID field on scopes; Option 82 circuit-ID → VLAN → scope auto-mapping (configurable)
+- [ ] VRF-aware scope isolation: split-horizon view per VRF keyed on client group CIDR
+- [ ] `listen` array on DNS and DHCP containers for per-interface binding
+- [ ] NATS subjects: `dnsdave.device.*` and `dnsdave.device.interface.*` and `dnsdave.device.address.*`
+- [ ] NetBox pull: import multi-interface devices; create device + all interface addresses
+- [ ] NetBox push: push device record with all interfaces and IPs to `dcim.Device` / `dcim.Interface` / `ipam.IPAddress`
+- [ ] UI: Device Management page (§6.15) with interface topology cards, lease status, DNS record summary
+
 ### v1.0 – Multi-region
 - [ ] Multi-region anycast (BGP)
 - [ ] Postgres logical replication cross-region
@@ -3374,6 +3479,360 @@ These endpoints are served by `dnsdave-api` and are the primary interface for th
 ```
 
 ---
+
+## 19. Multi-Homed Devices and Networks
+
+Many real networks contain devices with more than one network interface – servers with a management NIC and a data NIC, routers with LAN/WAN ports, hypervisors with bonded uplinks, access points bridging wired and wireless. DNSDave treats this as a first-class topology and provides:
+
+1. **A device model** – devices and their interfaces are first-class objects that can own DHCP reservations and DNS records across multiple scopes and zones.
+2. **Network-affinity DNS resolution** – a query for a multi-homed device's canonical name returns the IP that is topologically closest to the querying client, rather than a random round-robin answer.
+3. **Per-interface naming** – each interface may carry its own DNS alias in addition to the shared canonical name.
+4. **Unified DHCP reservation management** – all reservations for a device's interfaces are linked, so a single device record gives a complete inventory of all its network identities.
+5. **Multi-segment network awareness** – DHCP relay (RFC 3046), VLAN-tagged scopes, and VRF-aware scope assignment allow a single DNSDave instance to serve dozens of isolated L2 segments.
+
+---
+
+### 19.1 Device Model
+
+A **device** is any logical endpoint that may appear on more than one network segment. Each device has one or more **interfaces**, and each interface may hold one or more **IP addresses** (primary, secondary, VIP, anycast). Addresses are linked back to DHCP scopes (for dynamic addresses) or DNS records (for static addresses).
+
+```
+Device "fileserver-01"
+├── Interface "eth0"   MAC aa:bb:cc:dd:ee:ff   VLAN 10   primary
+│   ├── 192.168.10.5/24     scope: LAN     reservation: res-abc
+│   │   DNS: fileserver-01.home.arpa A 192.168.10.5
+│   │        fileserver-01-lan.home.arpa A 192.168.10.5    (interface alias)
+│   └── (DHCPv6 FD00::5/64  scope: LAN-v6  reservation: res-xyz)
+│
+└── Interface "eth1"   MAC 11:22:33:44:55:66   VLAN 20
+    ├── 10.20.0.5/24        scope: SERVERS  reservation: res-def
+    │   DNS: fileserver-01.home.arpa A 10.20.0.5          (second A record)
+    │        fileserver-01-srv.home.arpa A 10.20.0.5      (interface alias)
+    └── 10.20.0.6/24        secondary (VIP)
+        DNS: fileserver-01-vip.home.arpa A 10.20.0.6
+```
+
+#### Device types
+
+| Type | Examples |
+|---|---|
+| `host` | Workstations, laptops, desktop servers |
+| `server` | Rack servers, hypervisors, NAS |
+| `router` | Hardware routers, firewalls (pfSense, VyOS) |
+| `switch` | Managed L2/L3 switches |
+| `ap` | Wireless access points |
+| `printer` | Network printers, MFDs |
+| `vm` | Virtual machines |
+| `container` | Docker / Kubernetes pods with fixed IPs |
+| `iot` | Smart home, industrial sensors |
+| `other` | Anything not categorised above |
+
+#### Interface types
+
+| Type | Notes |
+|---|---|
+| `ethernet` | Standard wired NIC |
+| `wifi` | 802.11 wireless |
+| `bond` | Linux bonding (active-backup, LACP) |
+| `vlan` | 802.1Q tagged sub-interface |
+| `bridge` | Linux/BSD bridge |
+| `virtual` | VMware VMXNET, VirtIO, loopback-like |
+| `loopback` | Lo0 / lo – used for stable anycast VIPs on routers |
+| `tunnel` | WireGuard, OpenVPN, GRE, VXLAN |
+| `infiniband` | HPC / storage fabrics |
+
+---
+
+### 19.2 DNS for Multi-Homed Devices
+
+#### 19.2.1 Naming strategy (per device, configurable)
+
+| Strategy | Behaviour |
+|---|---|
+| `round_robin` | All interface IPs returned under the canonical name; answer order randomised per query |
+| `affinity` | Only the IP on the same subnet as the querying client is returned; round-robin fallback if no affinity match (default) |
+| `primary_only` | Only the primary interface IP is returned; secondary IPs are reachable only via interface-specific alias names |
+| `per_interface` | No shared canonical name; only interface-specific aliases are created |
+| `explicit` | Operator manually assigns which IPs appear in which DNS records |
+
+#### 19.2.2 Network-affinity resolution
+
+This is the most powerful strategy and the default for devices with more than one interface. When `dnsdave-dns` receives a query for a multi-homed device's canonical name:
+
+```
+Client 192.168.10.42 queries A fileserver-01.home.arpa
+
+Hot path:
+  1. Look up "fileserver-01.home.arpa" in local records map.
+  2. Fetch all A records (affinity-tagged): [192.168.10.5, 10.20.0.5]
+  3. Find the record whose subnet contains the querying client IP:
+       192.168.10.5/24 ⊇ 192.168.10.42  ✓  → select this record
+  4. Return: A 192.168.10.5  (TTL = record TTL)
+  5. If no match: return all records in round-robin order
+```
+
+The affinity lookup is a prefix-match against the in-memory CIDR table (`ArcSwap<Vec<(IpNet, Vec<RData>)>>`), added on the zero-allocation hot path after the main record lookup. It adds approximately 50–200 ns per query on a 5M-record DNS instance.
+
+Affinity data is encoded in the record metadata stored in Postgres and propagated to the DNS data plane via NATS on every device address change. No Postgres reads occur in the hot path.
+
+#### 19.2.3 Per-interface alias names
+
+Each interface may be given a **DNS alias** in addition to (or instead of) the device canonical name. Aliases are generated automatically or set manually:
+
+| Pattern | Example | Notes |
+|---|---|---|
+| Automatic (interface label) | `{device}.{iface}.{zone}` → `fileserver-01-eth0.home.arpa` | Sanitised: slashes, dots, underscores stripped |
+| Manual | `mgmt.fileserver-01.home.arpa` | Operator-defined |
+| VIP | `{device}-vip.{zone}` | For secondary/VIP addresses |
+
+#### 19.2.4 PTR records for multi-homed
+
+Each interface IP that has a DNS name generates a PTR record in the appropriate reverse zone:
+
+```
+5.10.168.192.in-addr.arpa  PTR  fileserver-01.home.arpa.
+5.0.20.10.in-addr.arpa     PTR  fileserver-01.home.arpa.
+6.0.20.10.in-addr.arpa     PTR  fileserver-01-vip.home.arpa.
+```
+
+PTR records are published via NATS `dnsdave.zone.record.*` events when device interface addresses change.
+
+#### 19.2.5 Dynamic DNS updates from multi-homed clients
+
+When a multi-homed client sends RFC 2136 DNS UPDATE packets:
+
+- The update is matched against the **device record** by MAC address (looked up from the DHCP lease).
+- Only the record corresponding to the updating interface is modified.
+- Other interfaces' records are left unchanged.
+- A NATS `dnsdave.zone.record.updated` event is published for the specific record only.
+
+---
+
+### 19.3 DHCP for Multi-Homed Devices
+
+#### 19.3.1 Multi-reservation device linking
+
+A single device entity can hold reservations in multiple scopes (one per interface per scope). This replaces the previous pattern of managing N unrelated reservations:
+
+```jsonc
+// Device with two interfaces, each reserved in a different scope
+{
+  "id": "dev-01",
+  "name": "fileserver-01",
+  "type": "server",
+  "interfaces": [
+    {
+      "name": "eth0",
+      "mac": "aa:bb:cc:dd:ee:ff",
+      "scope_id": "scope-lan",
+      "reserved_ip": "192.168.10.5",
+      "dns_alias": "fileserver-01-lan",
+      "is_primary": true
+    },
+    {
+      "name": "eth1",
+      "mac": "11:22:33:44:55:66",
+      "scope_id": "scope-servers",
+      "reserved_ip": "10.20.0.5",
+      "dns_alias": "fileserver-01-srv",
+      "is_primary": false
+    }
+  ],
+  "canonical_name": "fileserver-01",
+  "dns_zone": "home.arpa",
+  "naming_strategy": "affinity"
+}
+```
+
+When this device record is saved, `dnsdave-api` creates or updates:
+- Two DHCP reservations (one per interface × scope).
+- DNS A records for each interface IP under both the canonical name and any aliases.
+- PTR records in the relevant reverse zones.
+- All linked via foreign keys through `device_interface_addresses`.
+
+#### 19.3.2 Lease correlation across interfaces
+
+`dnsdave-dhcp` correlates leases from multiple MACs back to a single device:
+
+- When `aa:bb:cc:dd:ee:ff` acquires a lease, the DISCOVER is matched against `device_interfaces` by MAC. If the device has other interfaces currently active, the lease event payload includes the full device ID and sibling interface states.
+- NATS event `dnsdave.dhcp.lease.acquired` carries `device_id` and `interface_id` in addition to the standard MAC/IP fields.
+- The UI can display device online/offline status based on whether **any** interface has an active lease.
+
+#### 19.3.3 Option 82 (Relay Agent Information) for multi-segment DHCP
+
+When `dnsdave-dhcp` receives a DISCOVER via a relay agent, it reads:
+- **giaddr** (RFC 3046) to select the correct scope.
+- **Option 82 sub-option 1** (Agent Circuit ID) to identify the physical port/VLAN the client arrived on.
+- **Option 82 sub-option 2** (Agent Remote ID) to identify the relay device.
+
+Circuit ID and Remote ID are logged with each lease and can be used as scope-selection hints when multiple scopes share the same `giaddr` subnet (e.g., VLAN-separated networks on a shared relay subnet).
+
+#### 19.3.4 DHCP failover for multi-homed devices
+
+In HA deployments, multi-homed device reservations are replicated to all `dnsdave-dhcp` instances via NATS JetStream. If one interface's lease is renewed on a secondary node due to primary failure, the lease state is reconciled back to Postgres and the device record is kept consistent.
+
+---
+
+### 19.4 Multi-Segment Network Topologies
+
+#### 19.4.1 VLAN-tagged scopes
+
+Each scope can be annotated with a VLAN ID for documentation, NetBox sync, and Option 82 matching:
+
+```toml
+[scopes.lan]
+name        = "Office LAN"
+subnet      = "192.168.10.0/24"
+vlan_id     = 10
+vrf         = "corporate"
+
+[scopes.servers]
+name        = "Server VLAN"
+subnet      = "10.20.0.0/24"
+vlan_id     = 20
+vrf         = "corporate"
+```
+
+VLAN IDs are used:
+- To disambiguate DHCP DISCOVER packets arriving via an Option 82-capable relay.
+- For NetBox Prefix/VLAN synchronisation (pushed as VLAN association to the NetBox Prefix).
+- As a visual tag in the UI scope list.
+
+#### 19.4.2 VRF-aware scope isolation
+
+When multiple scopes share overlapping RFC 1918 address space (e.g., two separate `192.168.1.0/24` networks in different VRFs), DNSDave uses the `vrf` field on the scope to ensure:
+- DHCP leases and reservations are never cross-contaminated between VRFs.
+- DNS A records in one VRF do not resolve for clients in another VRF (enforced via split-horizon views keyed on VRF name, using client group CIDR membership).
+- NetBox sync pushes each prefix into the correct VRF.
+
+#### 19.4.3 DNSDave host multi-homing (listener binding)
+
+When the host running `dnsdave-dns` and `dnsdave-dhcp` is itself multi-homed, listener binding can be configured per-interface:
+
+```toml
+[dns]
+listen = [
+  "192.168.10.53:53",     # LAN interface
+  "10.20.0.53:53",        # Server VLAN interface
+  "127.0.0.1:53",         # Loopback (internal)
+]
+
+[dhcp]
+listen = [
+  "192.168.10.1:67",      # Serve LAN directly
+  "0.0.0.0:67",           # Or listen on all interfaces for relay traffic
+]
+```
+
+`SO_REUSEPORT` is used to allow multiple worker threads to share each listener socket. UDP DHCP relay traffic from `0.0.0.0:67` is disambiguated by `giaddr`.
+
+#### 19.4.4 Active-active DNS across multi-homed nodes
+
+In Kubernetes, `dnsdave-dns` pods are deployed as a DaemonSet – one pod per node. Each pod binds to the node's local IP for the relevant network. Clients on each network query their local pod. Consistent answers are guaranteed because all pods load the same `ArcSwap`-backed in-memory state from NATS JetStream.
+
+For multi-homed nodes where a single pod must serve multiple network segments, the pod's `listen` list is populated from the node's interface addresses via the Kubernetes Downward API.
+
+---
+
+### 19.5 Configuring Multi-Homed Devices via the API
+
+#### Create a multi-homed device with two interfaces
+
+```http
+POST /api/v1/devices
+Content-Type: application/json
+
+{
+  "name":            "fileserver-01",
+  "type":            "server",
+  "description":     "Primary file server",
+  "tags":            ["production"],
+  "dns_zone":        "home.arpa",
+  "naming_strategy": "affinity",
+  "interfaces": [
+    {
+      "name":          "eth0",
+      "mac":           "aa:bb:cc:dd:ee:ff",
+      "interface_type": "ethernet",
+      "vlan_id":       10,
+      "is_primary":    true,
+      "dns_alias":     "fileserver-01-lan",
+      "addresses": [
+        {
+          "address":      "192.168.10.5/24",
+          "scope_id":     "scope-lan",
+          "address_type": "primary"
+        }
+      ]
+    },
+    {
+      "name":          "eth1",
+      "mac":           "11:22:33:44:55:66",
+      "interface_type": "ethernet",
+      "vlan_id":       20,
+      "is_primary":    false,
+      "dns_alias":     "fileserver-01-srv",
+      "addresses": [
+        {
+          "address":      "10.20.0.5/24",
+          "scope_id":     "scope-servers",
+          "address_type": "primary"
+        },
+        {
+          "address":      "10.20.0.6/24",
+          "scope_id":     "scope-servers",
+          "address_type": "vip",
+          "dns_alias":    "fileserver-01-vip"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Response includes the automatically-created reservation IDs and DNS record IDs for all addresses.
+
+#### Promote a lease to a device record
+
+```http
+POST /api/v1/devices/from-lease
+Content-Type: application/json
+
+{ "lease_id": "lease-abc", "device_name": "fileserver-01" }
+```
+
+Creates a device with one interface populated from the lease (MAC, IP, scope). The existing lease is converted to a static reservation. Additional interfaces can be added via `POST /api/v1/devices/:id/interfaces`.
+
+---
+
+### 19.6 NATS Events for Device Changes
+
+| Subject | Published by | Description |
+|---|---|---|
+| `dnsdave.device.created.{id}` | `dnsdave-api` | New device record saved; all reservations and records created |
+| `dnsdave.device.updated.{id}` | `dnsdave-api` | Device name/strategy/tags changed |
+| `dnsdave.device.interface.added.{dev_id}.{iface_id}` | `dnsdave-api` | New interface added to device; reservation + DNS records created |
+| `dnsdave.device.interface.removed.{dev_id}.{iface_id}` | `dnsdave-api` | Interface removed; associated reservation + DNS records deleted |
+| `dnsdave.device.address.changed.{dev_id}.{iface_id}` | `dnsdave-api` or `dnsdave-dhcp` | Address on an interface changed (lease renewal to different IP) |
+| `dnsdave.device.deleted.{id}` | `dnsdave-api` | Device deleted; all reservations and DNS records removed |
+
+`dnsdave-dns` subscribes to these subjects to update its in-memory affinity CIDR table without restarting. `dnsdave-netbox` subscribes to push changes to NetBox device/interface/IP objects.
+
+---
+
+### 19.7 NetBox Integration for Multi-Homed Devices
+
+Multi-homed devices map cleanly to NetBox's `dcim.Device` + `dcim.Interface` + `ipam.IPAddress` hierarchy:
+
+| DNSDave object | NetBox object |
+|---|---|
+| `Device` | `dcim.Device` |
+| `DeviceInterface` | `dcim.Interface` (with type, MAC, VLAN) |
+| `DeviceInterfaceAddress` (primary) | `ipam.IPAddress` assigned to interface; `primary_ip4`/`primary_ip6` on the device |
+| `DeviceInterfaceAddress` (secondary/VIP) | `ipam.IPAddress` assigned to interface; `is_primary=False` |
+| `DeviceInterfaceAddress` (DHCP) | `ipam.IPAddress` with status=dhcp |
+
+On pull from NetBox (§17.10), devices with multiple interfaces are imported and create the corresponding multi-interface device record in DNSDave automatically, applying the default or configured naming strategy.
 
 ## 18. Identity, Access Management and RBAC
 

@@ -160,6 +160,10 @@ All icons from **Lucide** unless noted. Key mappings:
 | NetBox integration | `Box` (NetBox logo approximation) |
 | NetBox synced | `RefreshCw` |
 | NetBox conflict | `AlertCircle` |
+| Device | `Cpu` |
+| Interface | `Cable` |
+| Multi-homed / online | `Wifi` |
+| Interface offline | `WifiOff` |
 | Live / SSE active | `RadioTower` (pulsing) |
 | Healthy | `CheckCircle2` |
 | Warning | `AlertTriangle` |
@@ -225,6 +229,7 @@ Sections and items:
     Scopes
     Leases          ● live
     Reservations
+    Devices
     Options
     Client Classes
 
@@ -1630,6 +1635,251 @@ Denies are shown in the permission matrix with a red `✗` and take precedence o
 
 ---
 
+### 6.15 Device Management
+
+**Purpose:** Create and manage multi-homed devices – servers, routers, printers, VMs and any other endpoint that has more than one network identity. Each device groups interfaces, DHCP reservations, DNS records, and live lease status into a single coherent view.
+
+**Navigation:** Sidebar → `DHCP → Devices` (also reachable via `DNS → Records` by clicking a device-sourced record's "View device" link).
+
+**Required permission:** `devices:view`. Write actions require `devices:edit` or `devices:create`.
+
+---
+
+#### Device List view
+
+```
+┌─ Devices ─────────────────────────────── [+ New Device] [Import ▼] ──┐
+│                                                                         │
+│ [🔍 Search name, IP, MAC...      ]  [Type: All ▼]  [Zone: All ▼]     │
+│ [Tag: All ▼]  [Status: All ▼]                         [⊞] [≡] Views  │
+│                                                                         │
+│  ┌── fileserver-01 ─────────────────────────────── server  ✅ Online ─┐ │
+│  │  eth0  aa:bb:cc:dd:ee:ff  VLAN 10  192.168.10.5/24  LAN scope     │ │
+│  │  eth1  11:22:33:44:55:66  VLAN 20  10.20.0.5/24    SERVERS scope  │ │
+│  │  DNS: fileserver-01.home.arpa → affinity (2 records)  PTR ✓       │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                         │
+│  ┌── router-01 ─────────────────────────────────── router  ✅ Online ─┐ │
+│  │  eth0  00:11:22:33:44:55  VLAN 1   192.168.1.1/24   LAN scope     │ │
+│  │  eth1  00:11:22:33:44:56  VLAN 20  10.20.0.1/24    SERVERS scope  │ │
+│  │  lo0   (loopback)          10.255.0.1/32            VIP anycast   │ │
+│  │  DNS: router-01.home.arpa → affinity (3 records)   PTR ✓          │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                         │
+│  ┌── printer-01 ─────────────────────────────────── printer ⚠ Partial ┐ │
+│  │  eth0  aa:cc:ee:00:11:22  VLAN 10  192.168.10.80/24  LAN scope   │ │
+│  │  wifi  bb:dd:ff:00:11:22  VLAN 30  ✗ No active lease              │ │
+│  │  DNS: printer-01.home.arpa → primary_only (1 record)  PTR ✓       │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                          │
+│  Showing 3 of 47 devices                         [← Prev]  [Next →]   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Status indicators:**
+- `✅ Online` – at least one interface has an active DHCP lease or confirmed reachable address.
+- `⚠ Partial` – some interfaces online, others have no active lease.
+- `❌ Offline` – no interface has an active lease (static devices may still have valid DNS records).
+- `⚙ Static` – device has only static (non-DHCP) addresses; no lease tracking applies.
+
+**View toggle:** Card view (default, shown above) and table view. Table view shows one row per device with columns: Name, Type, Interfaces, IPs, DNS, Status, Last seen.
+
+---
+
+#### Device Detail page
+
+Navigated to by clicking a device card. Full-width page layout.
+
+```
+┌─ fileserver-01 ────────────────────────── ✅ Online  [Edit] [Delete] ─┐
+│  Type: server  |  Zone: home.arpa  |  Strategy: affinity              │
+│  Tags: production, storage                                             │
+│  Last seen: eth0 2 min ago · eth1 5 min ago                           │
+│                                                                         │
+│  ┌─ Interfaces ─────────────────────────────────────────────────────┐  │
+│  │                                                                   │  │
+│  │  ┌── eth0 ★ primary ──────────────────────────────────────────┐  │  │
+│  │  │  Type: ethernet   MAC: aa:bb:cc:dd:ee:ff   VLAN: 10        │  │  │
+│  │  │  DNS alias: fileserver-01-lan                               │  │  │
+│  │  │                                                             │  │  │
+│  │  │  Addresses:                                                 │  │  │
+│  │  │  192.168.10.5/24   primary   LAN scope  ✅ Reserved        │  │  │
+│  │  │   └─ DNS: fileserver-01.home.arpa A 192.168.10.5           │  │  │
+│  │  │         fileserver-01-lan.home.arpa A 192.168.10.5         │  │  │
+│  │  │         5.10.168.192.in-addr.arpa PTR fileserver-01.home   │  │  │
+│  │  │  [+ Add address]                                            │  │  │
+│  │  │                                                             │  │  │
+│  │  │  Lease: 192.168.10.5  issued 3h ago  expires in 21h        │  │  │
+│  │  └───────────────────────────────────── [Edit] [Remove iface] ─┘  │  │
+│  │                                                                   │  │
+│  │  ┌── eth1 ────────────────────────────────────────────────────┐  │  │
+│  │  │  Type: ethernet   MAC: 11:22:33:44:55:66   VLAN: 20        │  │  │
+│  │  │  DNS alias: fileserver-01-srv                               │  │  │
+│  │  │                                                             │  │  │
+│  │  │  Addresses:                                                 │  │  │
+│  │  │  10.20.0.5/24     primary   SERVERS scope  ✅ Reserved     │  │  │
+│  │  │   └─ DNS: fileserver-01.home.arpa A 10.20.0.5              │  │  │
+│  │  │         fileserver-01-srv.home.arpa A 10.20.0.5            │  │  │
+│  │  │         5.0.20.10.in-addr.arpa PTR fileserver-01.home      │  │  │
+│  │  │  10.20.0.6/24     vip       SERVERS scope  ✅ Static       │  │  │
+│  │  │   └─ DNS: fileserver-01-vip.home.arpa A 10.20.0.6          │  │  │
+│  │  │         6.0.20.10.in-addr.arpa PTR fileserver-01-vip.home  │  │  │
+│  │  │  [+ Add address]                                            │  │  │
+│  │  │                                                             │  │  │
+│  │  │  Lease: 10.20.0.5  issued 3h ago  expires in 21h           │  │  │
+│  │  └───────────────────────────────────── [Edit] [Remove iface] ─┘  │  │
+│  │                                                                   │  │
+│  │  [+ Add interface]                                                │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─ DNS Summary ─────────────────────────────────────────────────────┐  │
+│  │  Strategy: affinity                                               │  │
+│  │  A querying client on 192.168.10.0/24 receives: 192.168.10.5     │  │
+│  │  A querying client on 10.20.0.0/24 receives:    10.20.0.5        │  │
+│  │  No-match fallback: round-robin (both records)                    │  │
+│  │                                                                   │  │
+│  │  Record table:                                                    │  │
+│  │  fileserver-01.home.arpa          A    192.168.10.5   300 s      │  │
+│  │  fileserver-01.home.arpa          A    10.20.0.5      300 s      │  │
+│  │  fileserver-01-lan.home.arpa      A    192.168.10.5   300 s      │  │
+│  │  fileserver-01-srv.home.arpa      A    10.20.0.5      300 s      │  │
+│  │  fileserver-01-vip.home.arpa      A    10.20.0.6      300 s      │  │
+│  │  5.10.168.192.in-addr.arpa        PTR  fileserver-01.home.arpa.  │  │
+│  │  5.0.20.10.in-addr.arpa           PTR  fileserver-01.home.arpa.  │  │
+│  │  6.0.20.10.in-addr.arpa           PTR  fileserver-01-vip.home.arpa.│ │
+│  │                                                                   │  │
+│  │  [Test affinity resolution ▼]   Simulate client IP: [          ] │  │
+│  │  → Returns: A 192.168.10.5                                        │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─ Lease History ──────────────────────────────────────────────────┐  │
+│  │  Interface  IP              Acquired        Released      Duration│  │
+│  │  eth0       192.168.10.5    6h ago          active        6h+     │  │
+│  │  eth1       10.20.0.5       6h ago          active        6h+     │  │
+│  │  eth0       192.168.10.8    3 days ago      3 days ago    24h     │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ┌─ NetBox ─────────────────────────────────────────────────────────┐  │
+│  │  Status: ✅ Synced  Last pushed: 4 min ago                       │  │
+│  │  NetBox Device: fileserver-01 (ID 88)   [Open in NetBox ↗]      │  │
+│  │  [Push now]  [Pull now]                                          │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**"Test affinity resolution" panel:** The operator types a client IP and sees which DNS answer that client would receive — useful for verifying correct affinity behaviour without needing to query from the actual subnet.
+
+---
+
+#### Create / Edit Device modal
+
+```
+┌─ New Device ─────────────────────────────────────────────────────────┐
+│  Name:          [fileserver-01              ]                         │
+│  Type:          [server            ▼]                                 │
+│  Description:   [Primary file server        ]                         │
+│  Tags:          [production  ×] [storage  ×] [+ tag]                 │
+│  DNS Zone:      [home.arpa          ▼]                                │
+│  Canonical name: [fileserver-01.home.arpa   ]  (auto / editable)     │
+│                                                                        │
+│  DNS naming strategy:                                                  │
+│  ● Affinity  – return the IP on the same subnet as the querying client │
+│  ○ Round-robin – return all IPs in random order                       │
+│  ○ Primary only – return only the primary interface IP                 │
+│  ○ Per-interface – no shared canonical name; aliases only             │
+│  ○ Explicit – manually assign IPs to DNS records below                │
+│                                                                        │
+│  ── Interfaces ──────────────────────────────────────────────────── │
+│  ┌── Interface 1 ─────────────────────────────────────────────────┐ │
+│  │  Name: [eth0        ]  Type: [ethernet ▼]  ★ Primary          │ │
+│  │  MAC:  [aa:bb:cc:dd:ee:ff           ]  VLAN: [10    ]         │ │
+│  │  MTU:  [1500 ]  DNS alias: [fileserver-01-lan    ]            │ │
+│  │                                                                │ │
+│  │  Addresses:                                                    │ │
+│  │  [192.168.10.5/24  ] [primary ▼] Scope: [LAN    ▼] [× Del]  │ │
+│  │  [+ Add address]                                               │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                                                                        │
+│  ┌── Interface 2 ─────────────────────────────────────────────────┐ │
+│  │  Name: [eth1        ]  Type: [ethernet ▼]                      │ │
+│  │  MAC:  [11:22:33:44:55:66           ]  VLAN: [20    ]         │ │
+│  │  DNS alias: [fileserver-01-srv      ]                          │ │
+│  │                                                                │ │
+│  │  Addresses:                                                    │ │
+│  │  [10.20.0.5/24     ] [primary ▼] Scope: [SERVERS ▼] [× Del] │ │
+│  │  [10.20.0.6/24     ] [vip     ▼] Scope: [SERVERS ▼] [× Del] │ │
+│  │     VIP alias: [fileserver-01-vip   ]                         │ │
+│  │  [+ Add address]                                               │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                                                                        │
+│  [+ Add interface]                                                     │
+│                                                                        │
+│  ── Preview (what will be created) ─────────────────────────────── │
+│  DHCP reservations: 2   DNS A records: 5   PTR records: 3            │
+│                                                                        │
+│  [Create device]              [Cancel]                               │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Preview section:** Live-computed as the user fills in fields. Clicking "Preview" expands a table listing every record that will be created. The `[Create device]` button is disabled until all required fields are valid.
+
+---
+
+#### "Promote lease to device" flow
+
+Accessible from the DHCP Leases page via `[▼ Actions → Promote to device]` on any lease row.
+
+```
+┌─ Promote lease to device ────────────────────────────────────────────┐
+│  Lease: aa:bb:cc:dd:ee:ff → 192.168.10.5   LAN scope   (3h active)  │
+│                                                                        │
+│  Device name:    [fileserver-01             ]                         │
+│  Type:           [server            ▼]                                │
+│  Interface name: [eth0              ]   (auto-filled from lease)      │
+│  DNS alias:      [fileserver-01-lan ]                                 │
+│  DNS zone:       [home.arpa         ▼]                                │
+│  Naming:         [affinity          ▼]                                │
+│                                                                        │
+│  ☑ Convert dynamic lease to static reservation                       │
+│  ☑ Create DNS A record                                                │
+│  ☑ Create PTR record                                                  │
+│                                                                        │
+│  ── Additional interfaces? ─────────────────────────────────────────│ │
+│  Does this device have more network interfaces?                       │
+│  [+ Add another interface]                                            │
+│                                                                        │
+│  [Promote]                          [Cancel]                          │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### Interface topology diagram (optional panel)
+
+On the device detail page, a `[Show topology]` button expands a visual diagram:
+
+```
+        ┌────────────────────┐
+        │  fileserver-01     │
+        │  (server)          │
+        └────────┬───────────┘
+                 │
+        ┌────────┴────────┐
+        │                 │
+   ┌────┴─────┐      ┌────┴─────┐
+   │   eth0   │      │   eth1   │
+   │ VLAN 10  │      │ VLAN 20  │
+   │ 192.168  │      │ 10.20.   │
+   │ .10.5    │      │ 0.5      │
+   └────┬─────┘      └────┬─────┘
+        │                 │
+   [LAN scope]     [SERVERS scope]
+```
+
+Rendered as an inline SVG using coordinates computed from the interface list. No third-party graph library needed.
+
+---
+
 ## 7. Component Catalogue
 
 ### 7.1 `StatusBadge`
@@ -2238,6 +2488,20 @@ Every UI page maps to specific API endpoints. This table is the source of truth 
 | NetBox – mappings | GET/POST/PUT/DELETE | `/api/v1/integrations/netbox/mappings` | VRF/site/tenant/tag → scope/zone/group |
 | NetBox – activity log | GET | `/api/v1/integrations/netbox/log` | Paginated; filterable by direction/status/type |
 | NetBox – activity live | SSE | `/api/v1/integrations/netbox/log/stream` | Real-time sync event stream |
+| Devices – list | GET | `/api/v1/devices` | `?type=&tag=&zone=&status=&q=` |
+| Devices – create | POST | `/api/v1/devices` | Creates reservations + DNS records atomically |
+| Devices – detail | GET | `/api/v1/devices/:id` | Includes interfaces, addresses, lease status |
+| Devices – update | PATCH | `/api/v1/devices/:id` | Name, strategy, tags |
+| Devices – delete | DELETE | `/api/v1/devices/:id` | Deletes all reservations and DNS records |
+| Devices – add interface | POST | `/api/v1/devices/:id/interfaces` | |
+| Devices – update interface | PATCH | `/api/v1/devices/:id/interfaces/:iid` | |
+| Devices – delete interface | DELETE | `/api/v1/devices/:id/interfaces/:iid` | |
+| Devices – add address | POST | `/api/v1/devices/:id/interfaces/:iid/addresses` | |
+| Devices – update address | PATCH | `/api/v1/devices/:id/interfaces/:iid/addresses/:aid` | |
+| Devices – delete address | DELETE | `/api/v1/devices/:id/interfaces/:iid/addresses/:aid` | |
+| Devices – DNS records | GET | `/api/v1/devices/:id/dns` | All A, AAAA, PTR records |
+| Devices – leases | GET | `/api/v1/devices/:id/leases` | Active + historical leases |
+| Devices – from lease | POST | `/api/v1/devices/from-lease` | `{ lease_id, device_name, ... }` |
 | Auth – login | POST | `/api/v1/auth/login` | Returns JWT; sets httpOnly refresh cookie |
 | Auth – logout | POST | `/api/v1/auth/logout` | Revokes refresh token |
 | Auth – refresh | POST | `/api/v1/auth/refresh` | SvelteKit SSR calls this transparently |
@@ -2354,6 +2618,21 @@ The UI runs as a dedicated container: `dnsdave-ui`.
 - [ ] Accessibility audit (WCAG 2.1 AA)
 - [ ] Keyboard shortcut overlay (`?`)
 - [ ] Light theme complete and tested
+
+### UI-v0.9 – Multi-Homed Device Management
+- [ ] Device list page: card view + table view; status badges (Online / Partial / Offline / Static)
+- [ ] Device detail page: interface cards with addresses, lease status, DNS records per address
+- [ ] DNS Summary panel with affinity resolution explanation + test tool (simulate client IP → which IP is returned)
+- [ ] Interface topology SVG diagram (inline, no third-party graph library)
+- [ ] Create device modal: N interfaces × M addresses; scope picker per address; naming strategy selector
+- [ ] Live preview of records to be created (reservation count, DNS A count, PTR count)
+- [ ] Edit interface modal: MAC, alias, VLAN, MTU; hot-patches in-memory state via NATS
+- [ ] "Promote lease to device" flow from DHCP Leases page (Actions menu)
+- [ ] "Add interface" to existing device from DHCP Leases (link a new lease/reservation to an existing device)
+- [ ] Lease history timeline on device detail
+- [ ] NetBox sync status card on device detail (push/pull per device)
+- [ ] Sidebar `DHCP → Devices` nav item
+- [ ] `<Guard>` wrappers on all write actions
 
 ### UI-v0.8 – RBAC and User Management
 - [ ] Login page (username/password form, "remember me", forgot password flow)

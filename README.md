@@ -73,6 +73,7 @@ See [`COMPARISON.md`](COMPARISON.md) for a full comparison against Pi-hole, AdGu
 - **Lock-free ArcSwap structures** – blocklist, zone trie, forward zone table, and allowlist all hot-swap via atomic pointer swap with no query-path locking
 - **GC-free** – written in Rust; no garbage collector pauses on the hot path
 - **Pluggable observability export** – `dnsdave-export` subscribes to NATS and pushes events to any external system: syslog (rsyslog), Grafana Loki, ELK / Logstash, Splunk, InfluxDB, StatsD, Datadog, or generic HTTP webhook – zero changes to existing containers required
+- **NetBox 4.5+ IPAM integration** – `dnsdave-netbox` (v0.7) pushes DHCP leases, scopes, static reservations, and DNS records to NetBox automatically via Diode (gRPC) or the NetBox REST API, keeping your IPAM database reconciled without manual data entry
 
 ---
 
@@ -226,7 +227,7 @@ All container images are published as **multi-arch manifests** – `docker pull`
 DNSDave is scoped deliberately. It does not:
 
 - **Act as a public internet DNS server** – it is designed for private networks. Use PowerDNS or Cloudflare for public authoritative hosting.
-- **Include IPAM** – IP address management (subnet tracking, network discovery) is out of scope. Pair DNSDave with [NetBox](https://netbox.dev) for a full DDI stack.
+- **Include native IPAM** – built-in subnet planning and network discovery are out of scope. The optional `dnsdave-netbox` container (v0.7) automatically pushes leases, prefixes, and DNS records to [NetBox](https://netbox.dev) 4.5+ via Diode or REST API to provide a continuously reconciled IPAM view.
 - **Perform full recursive resolution** – it always forwards to a configured upstream. For full recursion use [Unbound](https://nlnetlabs.nl/projects/unbound/).
 - **Replace CoreDNS for Kubernetes service discovery** – DNSDave coexists with CoreDNS; CoreDNS handles `cluster.local`, DNSDave handles the network perimeter.
 

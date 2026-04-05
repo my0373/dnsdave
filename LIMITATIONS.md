@@ -35,13 +35,37 @@ Limitations fall into three categories, clearly labelled throughout:
 
 ## 1. Architectural Constraints
 
-### No IPAM — **Never**
+### No Native IPAM — **Different**
 
-DNSDave handles the **D** (DNS) and **D** (DHCP) in DDI. It does not handle the **I** (IP Address Management): subnet planning, address utilisation tracking, network topology mapping, or automated network discovery.
+DNSDave handles the **D** (DNS) and **D** (DHCP) in DDI. It does not have a built-in IPAM module: no subnet planning UI, no address utilisation dashboards, no network topology maps, and no automated network discovery engine.
 
-This is an explicit design boundary, not an oversight. IPAM is a large, distinct problem domain. Adding it would roughly double the scope of the project and dilute focus.
+This is an intentional design boundary, not an oversight. IPAM is a large, distinct problem domain; building it inside DNSDave would roughly double the project's scope and dilute focus.
 
-**What to do instead:** Pair DNSDave with [NetBox](https://netbox.dev) (open source, excellent REST API) or [phpIPAM](https://phpipam.net) for a complete DDI stack. DNSDave's REST API makes it straightforward to update DNS and DHCP records from NetBox workflows.
+**What DNSDave does instead:** the optional `dnsdave-netbox` container (v0.7) automatically pushes IPAM-relevant data to [NetBox](https://netbox.dev) 4.5+ in near-real-time via either:
+
+- **Diode** (recommended) – NetBox Labs' gRPC ingestion agent; handles idempotent reconciliation.
+- **NetBox REST API** – direct HTTP pushes for operators who prefer not to run a Diode server.
+
+The following DNSDave objects are pushed automatically:
+
+| DNSDave object | NetBox object pushed |
+|---|---|
+| DHCP scope (network + mask) | Prefix |
+| DHCP pool (start – end) | IP Range |
+| DHCP lease (MAC → IP → hostname) | IP Address (status=dhcp) |
+| Static DHCP reservation | IP Address (status=dhcp, reserved=true) |
+| DNS A/AAAA record | IP Address with `dns_name` set |
+| DHCP client (optional, off by default) | Device + Interface |
+
+The result is a continuously reconciled NetBox instance that reflects the live state of your network without manual data entry.
+
+**What still requires NetBox directly:**
+- Subnet planning and prefix utilisation visualisation.
+- Network discovery (scanning, ARP/MAC table collection).
+- Rack and cable management.
+- IP assignment workflows that originate in NetBox and are pushed *to* DNSDave (this is planned as a future feature: NetBox webhook → DNSDave API).
+
+**What to do if you don't use NetBox:** [phpIPAM](https://phpipam.net) is an alternative; DNSDave's REST API makes integration straightforward via its webhook backend. An HTTP webhook export from `dnsdave-export` can populate any IPAM system with a JSON receiver.
 
 ---
 
@@ -472,7 +496,7 @@ DNSDave is deliberately scoped. The table below captures the most impactful gaps
 
 | Gap | Severity | Workaround / Timeline |
 |-----|----------|-----------------------|
-| No IPAM | High for enterprise | Pair with NetBox |
+| No native IPAM | Medium – mitigated by NetBox push | `dnsdave-netbox` (v0.7) pushes leases, prefixes, IP ranges, and DNS records to NetBox 4.5+ automatically via Diode or REST API |
 | Not a recursive resolver | Low for most deployments | Use Unbound upstream |
 | Not suitable for public internet DNS | Medium | Use PowerDNS / cloud DNS for public zones |
 | Requires NATS + Postgres | Medium | Minimal profile uses SQLite; still needs NATS |

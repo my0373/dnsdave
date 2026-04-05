@@ -78,6 +78,7 @@ graph TD
         STATS["dnsdave-stats\nIn-memory stats aggregator"]
         EXPORT["dnsdave-export\nPluggable observability exporter\nsyslog · OTLP · Loki · InfluxDB · StatsD · webhook"]
         DHCP["dnsdave-dhcp  (Rust)\n:67 UDP DHCPv4  ·  :547 UDP DHCPv6\nDORA + SARR state machines\nPXE · relay · vendor classes"]
+        NETBOX["dnsdave-netbox\nNetBox 4.5+ integration\nDiode (gRPC) · REST API\nIPAM push: prefixes · IP ranges · addresses · devices"]
     end
 
     PG[("PostgreSQL\nconfig · lists · logs · leases")]
@@ -93,6 +94,8 @@ graph TD
     NATS -->|"query events"| STATS
     NATS -->|"all events"| EXPORT
     EXPORT -->|"syslog / OTLP / Loki / InfluxDB / ..."| EXT[("External Systems\nrsyslog · Grafana · ELK\nSplunk · Datadog · InfluxDB")]
+    NATS -->|"lease · scope · DNS record events"| NETBOX
+    NETBOX -->|"Diode gRPC or REST API"| NB[("NetBox 4.5+\nPrefixes · IP Ranges\nIP Addresses · Devices")]
     SYNC -->|"blocklist diffs · bloom filter\nready signals"| NATS
     DHCP -->|"lease events"| NATS
     NATS -->|"scope config · reservations"| DHCP
@@ -114,6 +117,7 @@ graph TD
 | `dnsdave-dhcp` | **Rust** | DHCPv4/DHCPv6 server. Publishes lease events. Dynamic DNS via NATS. | NATS + Postgres |
 | `dnsdave-ui` | **TypeScript** (SvelteKit) | Web management UI. Proxies REST + SSE to `dnsdave-api`. No direct DB or NATS access. See `UI.md`. | `dnsdave-api` only |
 | `dnsdave-export` | **Rust** | Pluggable observability exporter. Subscribes to all NATS event subjects and forwards to configured external backends. Zero Postgres access. Optional container – omit if no external export needed. | NATS only |
+| `dnsdave-netbox` | **Rust** | NetBox 4.5+ IPAM integration. Subscribes to DHCP scope, lease, and DNS record events and pushes corresponding objects (Prefixes, IP Ranges, IP Addresses, Devices) to NetBox via either Diode (gRPC) or the NetBox REST API. Zero Postgres access. Optional container. | NATS + NetBox (Diode or REST) |
 | `nats` | - | Event bus. Core pub/sub + JetStream + Object Store + KV Store. | - |
 | `postgres` | - | Primary persistent storage. | - |
 
@@ -202,8 +206,11 @@ dnsdave.
 │   ├── lease.assigned.{scope_id}   # new or renewed lease (JetStream, at-least-once)
 │   ├── lease.released.{scope_id}   # client sent RELEASE (JetStream)
 │   ├── lease.expired.{scope_id}    # lease timer expired (JetStream)
-│   └── discover.{scope_id}         # DISCOVER received (core, analytics only)
-│                                    # Delivery: JetStream for lease.* ; core for discover
+│   ├── discover.{scope_id}         # DISCOVER received (core, analytics only)
+│   ├── scope.created.{scope_id}    # DHCP scope created via API (JetStream) → NetBox Prefix
+│   ├── scope.updated.{scope_id}    # DHCP scope modified via API (JetStream) → NetBox Prefix update
+│   └── scope.deleted.{scope_id}    # DHCP scope removed via API (JetStream) → NetBox Prefix remove
+│                                    # Delivery: JetStream for lease.* and scope.* ; core for discover
 │
 ├── zone.
 │   ├── serial.updated.{zone_name}  # SOA serial changed; triggers ArcSwap + NOTIFY
@@ -233,7 +240,7 @@ dnsdave.
 |--------|----------|-----------|---------|
 | `DNSDAVE_CONFIG` | `dnsdave.config.>` | All messages | Config replay for new/restarted DNS nodes |
 | `DNSDAVE_BLOCKLIST` | `dnsdave.blocklist.>` | Last per subject | Blocklist diff replay |
-| `DNSDAVE_DHCP` | `dnsdave.dhcp.lease.>` | 90 days | Lease history; replayed by DNS nodes for dynamic record state |
+| `DNSDAVE_DHCP` | `dnsdave.dhcp.lease.>`, `dnsdave.dhcp.scope.>` | 90 days (lease) / all (scope) | Lease history; scope lifecycle; replayed by DNS nodes and `dnsdave-netbox` |
 | `DNSDAVE_ZONES` | `dnsdave.zone.>` | All messages | Zone / SOA state replay – new DNS nodes self-bootstrap zone authority and serial state |
 | `DNSDAVE_DNSSEC` | `dnsdave.dnssec.>` | All messages | DNSSEC key lifecycle events; zone re-sign notifications |
 | `DNSDAVE_QUERYLOG` | `dnsdave.query.>` | 24h rolling | Audit / log writer catch-up |
@@ -2069,6 +2076,7 @@ NATS per-container permissions:
 - `dnsdave-dhcp`: publish `dnsdave.dhcp.lease.*`; subscribe `dnsdave.config.>`; no publish on config subjects
 - `dnsdave-api`: publish `dnsdave.config.*`, `dnsdave.zone.*`, `dnsdave.dnssec.*`; no publish on query or lease subjects
 - `dnsdave-export`: subscribe `dnsdave.query.*`, `dnsdave.dhcp.lease.*`, `dnsdave.zone.*`, `dnsdave.config.*`, `dnsdave.dnssec.*`, `dnsdave.blocklist.*`; publish nothing; no Postgres access; deny-all on any publish subject
+- `dnsdave-netbox`: subscribe `dnsdave.dhcp.lease.*`, `dnsdave.dhcp.scope.*`, `dnsdave.zone.record.*`, `dnsdave.config.dhcp.*`; publish nothing; no Postgres access; deny-all on any publish subject
 
 ### 13.1 Certificate Management
 
@@ -2260,6 +2268,30 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 - [ ] Postgres Patroni HA; active-active DNS with keepalived/VRRP
 - [ ] Pi-hole API shim (v6)
 
+### v0.7 – NetBox Integration
+
+- [ ] `dnsdave-netbox` container: NATS subscriber, dual-mode (Diode gRPC + REST API)
+- [ ] `dhcp.scope.created/updated/deleted` NATS subjects published by `dnsdave-api`
+- [ ] Prefix push: DHCP scope creation/update/deletion → NetBox Prefix lifecycle
+- [ ] IP Range push: DHCP pool bounds → NetBox IP Range
+- [ ] IP Address push: lease assigned/released/expired → NetBox IP Address (status management)
+- [ ] IP Address push: static reservations → NetBox IP Address (status=dhcp, reserved=true)
+- [ ] DNS record sync: A/AAAA records → NetBox IP Address `dns_name` field
+- [ ] Merge strategy: IP Address retains lease status + DNS name when both sources present
+- [ ] Conflict strategies: overwrite / skip / tag_conflict / merge
+- [ ] Lifecycle config: on_lease_expiry / on_lease_release / on_scope_delete
+- [ ] VRF, site, tenant, tag configuration
+- [ ] NetBox custom field bootstrap script (`deploy/netbox/bootstrap_custom_fields.py`)
+- [ ] Diode mode: gRPC push via `tonic` + `prost`; auto-reconnect on Diode server restart
+- [ ] REST API mode: create-or-update with conflict detection; token-bucket rate limiting
+- [ ] Device auto-creation (off by default): MAC lookup → assign IP to interface; create Device if not found; guarded by per-hour cap, dry-run mode, MAC-prefix allowlist
+- [ ] Health endpoint `:9095/health`; Prometheus metrics `:9095/metrics`
+- [ ] NATS lag alerting: `max_lag_seconds` threshold → health endpoint `503`
+- [ ] Reference `docker-compose.netbox.yml` (Diode + dnsdave-netbox)
+- [ ] Reference `docker-compose.netbox-api.yml` (REST API only, no Diode)
+- [ ] Helm chart additions: `Deployment/dnsdave-netbox`, `ConfigMap`, `Secret`
+- [ ] `dnsdave-netbox` multi-arch container image (amd64, arm64, arm/v7)
+
 ### v1.0 – Multi-region
 - [ ] Multi-region anycast (BGP)
 - [ ] Postgres logical replication cross-region
@@ -2280,6 +2312,7 @@ This works for any service running in the local environment: Nginx, Proxmox, Hom
 | `dnsdave-log` | **Rust** | `async-nats`, `sqlx`, `tokio` |
 | `dnsdave-stats` | **Rust** | `async-nats`, `tokio`, `dashmap` |
 | `dnsdave-export` | **Rust** | `async-nats`, `tokio`, `opentelemetry`, `opentelemetry-otlp`, `tonic` (gRPC), `reqwest`, `serde_json`, `serde`, `toml` (config), `bytes` (line protocol), `tracing` |
+| `dnsdave-netbox` | **Rust** | `async-nats`, `tokio`, `tonic` (gRPC for Diode), `prost` (protobuf), `reqwest` (REST API mode), `serde_json`, `serde`, `toml` (config), `tracing`, `governor` (rate-limit token bucket) |
 
 ### 15.2 Infrastructure
 
@@ -2350,3 +2383,340 @@ All containers are Rust for consistency. `dhcproto` covers DHCPv4 and DHCPv6 wit
 20. **`dnsdave-export` back-pressure** – If a backend (e.g., Logstash, remote Loki) is slow or down, NATS JetStream consumer ACK delay will build up. Should `dnsdave-export` use a bounded in-memory queue per backend with drop-oldest semantics, or block ACK and let JetStream naturally slow the consumer? The latter risks head-of-line blocking for other subjects on the same consumer.
 21. **Export schema versioning** – As new event types or fields are added, how should backward compatibility be maintained for external consumers that have dashboards or parser rules built against the schema? Versioned `event_schema_version` field in every envelope, with a compatibility matrix doc?
 22. **Syslog TLS (RELP/RFC 5425)** – For production deployments where syslog traffic must be encrypted (PCI-DSS, HIPAA). `dnsdave-export` should support TLS-wrapped TCP syslog (RFC 5425) and optionally RELP. Is this in scope for v0.5 or a follow-up?
+23. **NetBox device auto-creation** – When `dnsdave-netbox` sees a new DHCP lease for an unknown MAC address, should it be allowed to auto-create a Device/VM record in NetBox? Powerful but risky: misconfigured auto-creation can pollute the NetBox DCIM database. Default should be off; what guard-rails prevent runaway creation (rate limit, max-per-hour cap, dry-run mode)?
+24. **NetBox VRF mapping** – In a multi-VRF environment, how should `dnsdave-netbox` determine which NetBox VRF a DHCP scope belongs to? Per-scope config annotation, or automatic mapping from the scope's gateway interface?
+25. **Diode vs REST API consistency** – Diode performs asynchronous reconciliation; a REST API push is synchronous. If `dnsdave-netbox` is in Diode mode and the Diode server is down, events queue in NATS JetStream. In REST API mode, a NetBox outage blocks the ACK. Should both modes expose a configurable `max_lag_seconds` threshold that alerts via the health endpoint?
+
+---
+
+## 17. NetBox Integration
+
+DNSDave integrates with [NetBox](https://netbox.dev) 4.5+ to automatically push IPAM data – IP addresses, prefixes, IP ranges, and optionally device records – as DHCP leases are assigned, scopes are created, and DNS records are updated. This closes the "I" in DDI without requiring NetBox to poll DNSDave; data flows from NATS events in near-real-time.
+
+### 17.1 Architecture
+
+`dnsdave-netbox` is an optional, stateless container that subscribes to a subset of NATS subjects and pushes corresponding objects to NetBox. Like `dnsdave-export`, it makes zero changes to any existing container and has no database access – all its data comes from the NATS event bus.
+
+```mermaid
+flowchart LR
+    subgraph DNSDave
+        DHCP["dnsdave-dhcp"]
+        API["dnsdave-api"]
+        NATS["NATS JetStream\ndhcp.lease.*\ndhcp.scope.*\nzone.record.*"]
+        NB["dnsdave-netbox"]
+    end
+
+    DHCP -->|"lease events"| NATS
+    API  -->|"scope / record events"| NATS
+    NATS --> NB
+
+    subgraph Integration Layer
+        DIODE["Diode Server\n(gRPC · async reconciliation)"]
+        REST["NetBox REST API\n(HTTP · synchronous)"]
+    end
+
+    NB -->|"mode = diode"| DIODE
+    NB -->|"mode = api"| REST
+
+    subgraph NetBox 4.5+
+        PFX["Prefixes"]
+        IPR["IP Ranges"]
+        IPA["IP Addresses"]
+        DEV["Devices / Interfaces"]
+        VMS["Virtual Machines"]
+    end
+
+    DIODE --> PFX & IPR & IPA & DEV & VMS
+    REST  --> PFX & IPR & IPA & DEV & VMS
+```
+
+### 17.2 Integration Modes
+
+#### Mode A – Diode (recommended for continuous / high-frequency updates)
+
+[Diode](https://github.com/netboxlabs/diode) is NetBox Labs' open-source gRPC ingestion agent. It accepts a stream of entity objects, handles idempotent create-or-update reconciliation internally, and pushes changes to NetBox in batches. The key properties that make it the recommended mode for DNSDave:
+
+- **Stateless push model:** `dnsdave-netbox` sends every event without needing to track whether the object already exists in NetBox – Diode handles "does this IP already exist? update or create" transparently.
+- **High throughput:** gRPC + protobuf is significantly more efficient than HTTP JSON for the volume of events at busy networks (thousands of lease events per hour).
+- **NATS back-pressure handling:** if the Diode server is temporarily unavailable, NATS JetStream holds the unacked events and delivers them when Diode reconnects. No data loss.
+- **Decoupled from NetBox availability:** the Diode server can buffer events and replay them even if NetBox itself is in maintenance mode.
+
+`dnsdave-netbox` communicates with a `diode-server` container via gRPC using the Diode proto schema. The Diode server is a separate container added to the compose stack.
+
+#### Mode B – NetBox REST API (for fine-grained control or existing deployments)
+
+For operators who already have a NetBox deployment and prefer not to run a Diode server, `dnsdave-netbox` can push directly to the NetBox 4.5 REST API (`/api/ipam/`, `/api/dcim/`).
+
+- **Synchronous:** each NATS event triggers one or more HTTP calls to NetBox.
+- **Stateful conflict handling:** `dnsdave-netbox` must check whether an object exists (HTTP `GET`) before deciding to `POST` (create) or `PATCH` (update). This requires two round-trips per event.
+- **Rate limited:** NetBox's API enforces rate limiting; `dnsdave-netbox` implements token-bucket throttling on outgoing requests.
+- **NetBox outage risk:** if NetBox is unreachable, the NATS consumer ACK is delayed, causing NATS JetStream back-pressure. A configurable `max_lag` threshold triggers an alert via the health endpoint if unacked events accumulate.
+
+### 17.3 NATS Events Consumed
+
+| NATS Subject | Trigger | NetBox Object(s) Affected |
+|---|---|---|
+| `dnsdave.dhcp.scope.created.{scope_id}` | DHCP scope created via API | Create Prefix (network/mask); create IP Range (pool start–end) |
+| `dnsdave.dhcp.scope.updated.{scope_id}` | DHCP scope modified | Update Prefix description, tags; update IP Range bounds |
+| `dnsdave.dhcp.scope.deleted.{scope_id}` | DHCP scope removed | Prefix → status `container`; IP Range removed (configurable) |
+| `dnsdave.dhcp.lease.assigned.{scope_id}` | Lease assigned or renewed | Create or update IP Address (status=`dhcp`); optionally update Device interface |
+| `dnsdave.dhcp.lease.released.{scope_id}` | Client sent RELEASE | IP Address status → `available` or remove (configurable) |
+| `dnsdave.dhcp.lease.expired.{scope_id}` | Lease timer expired | IP Address status → `available` or remove (configurable) |
+| `dnsdave.zone.record.created.{zone}` | DNS A or AAAA record added | Create or update IP Address with `dns_name` set |
+| `dnsdave.zone.record.deleted.{zone}` | DNS A or AAAA record removed | Clear `dns_name` from IP Address, or remove if no lease |
+
+### 17.4 NetBox Object Mapping
+
+#### DHCP Scope → Prefix + IP Range
+
+```
+dnsdave_scope {                     NetBox Prefix {
+  id:         "scope_lan"             prefix:      "192.168.1.0/24"
+  name:       "LAN"         →         description: "LAN (dnsdave scope_lan)"
+  network:    "192.168.1.0"           status:      "active"
+  prefix_len: 24                      tags:        ["dnsdave", "dhcp"]
+  gateway:    "192.168.1.1"           custom_fields: {
+  pool_start: "192.168.1.100"           dnsdave_scope_id: "scope_lan"
+  pool_end:   "192.168.1.200"           dnsdave_gateway:  "192.168.1.1"
+}                                     }
+                                    }
+
+                                    NetBox IP Range {
+                                      start_address: "192.168.1.100/24"
+                                      end_address:   "192.168.1.200/24"
+                                      status:        "dhcp"
+                                      description:   "DHCP pool (scope_lan)"
+                                      tags:          ["dnsdave", "dhcp"]
+                                    }
+```
+
+#### DHCP Lease → IP Address
+
+```
+dnsdave_lease {                     NetBox IP Address {
+  ip:         "192.168.1.105"         address:     "192.168.1.105/24"
+  mac:        "aa:bb:cc:dd:ee:ff"  →  status:      "dhcp"
+  hostname:   "mylaptop"              dns_name:    "mylaptop.home.arpa"
+  scope_id:   "scope_lan"            description: "DHCP lease (aa:bb:cc:dd:ee:ff)"
+  expires_at: 1712330000             tags:        ["dnsdave", "dhcp-lease"]
+}                                     custom_fields: {
+                                        dnsdave_mac:        "aa:bb:cc:dd:ee:ff"
+                                        dnsdave_scope_id:   "scope_lan"
+                                        dnsdave_expires_at: "2026-04-05T10:00:00Z"
+                                      }
+                                    }
+```
+
+#### Static DHCP Reservation → IP Address
+
+```
+dnsdave_reservation {               NetBox IP Address {
+  ip:       "192.168.1.10"            address:  "192.168.1.10/24"
+  mac:      "11:22:33:44:55:66"  →    status:   "dhcp"
+  name:     "nas"                     dns_name: "nas.home.arpa"
+  scope_id: "scope_lan"              description: "Static reservation (nas)"
+}                                     custom_fields: {
+                                        dnsdave_mac:      "11:22:33:44:55:66"
+                                        dnsdave_reserved: true
+                                      }
+                                    }
+```
+
+#### DNS A/AAAA Record → IP Address
+
+```
+dnsdave_record {                    NetBox IP Address {
+  name:  "server.home.arpa"           address:  "192.168.1.1/24"
+  type:  "A"                  →       status:   "active"
+  value: "192.168.1.1"                dns_name: "server.home.arpa"
+  zone:  "home.arpa"                  tags:     ["dnsdave", "dns-record"]
+}                                   }
+```
+
+When both a DHCP lease and a DNS record exist for the same IP, the objects are merged: the IP Address retains `status=dhcp` from the lease and gains `dns_name` from the record.
+
+#### Optional: Device / Interface Auto-creation
+
+When `sync.devices = true` (disabled by default), on each lease assignment `dnsdave-netbox` queries NetBox for an existing Device or Virtual Machine with a matching MAC address:
+
+- **Found:** the IP Address is assigned to that interface in NetBox.
+- **Not found and `auto_create_devices = true`:** a new Device is created with a configurable role, device type, site, and tenant. One interface (`eth0` or derived from DHCP option 61/client-id) is created with the MAC address and the leased IP assigned to it.
+
+Auto-creation is gated by:
+- A per-hour cap (`auto_create_max_per_hour`, default 10) to prevent runaway creation from DHCP floods.
+- A dry-run mode (`auto_create_dry_run = true`) that logs what would be created without writing to NetBox.
+- An explicit allowlist (`auto_create_mac_prefix`) to restrict creation to specific OUI prefixes.
+
+### 17.5 Configuration
+
+`dnsdave-netbox` is configured via `netbox.toml` (path set by `DNSDAVE_NETBOX_CONFIG`) or environment variables with the prefix `DNSDAVE_NETBOX_`.
+
+```toml
+# netbox.toml — full example
+
+[connection]
+mode = "diode"          # "diode" | "api"
+nats_url = "nats://nats:4222"
+nats_creds = "/run/secrets/netbox.creds"
+
+# ── Mode A: Diode ────────────────────────────────────────────────
+[diode]
+target  = "grpc://diode-server:8080"   # Diode server gRPC endpoint
+api_key = "${DIODE_API_KEY}"
+tls     = true
+ingester = "dnsdave"                   # Diode ingester label
+
+# ── Mode B: NetBox REST API ──────────────────────────────────────
+[api]
+url     = "https://netbox.example.com"
+token   = "${NETBOX_TOKEN}"
+tls_verify = true
+timeout_s  = 10
+rate_limit_per_s = 20       # stay well below NetBox's 1,000 req/min default
+
+# ── What to push ─────────────────────────────────────────────────
+[sync]
+prefixes     = true          # DHCP scopes → NetBox Prefixes
+ip_ranges    = true          # DHCP pool bounds → NetBox IP Ranges
+ip_addresses = true          # Leases + DNS records → NetBox IP Addresses
+devices      = false         # Device / interface assignment (see [devices])
+
+vrf          = ""            # VRF slug to assign all objects to ("" = global table)
+site         = ""            # NetBox site slug (optional; blank = no site)
+tenant       = ""            # NetBox tenant slug (optional)
+tags         = ["dnsdave"]   # Tags applied to every object written by DNSDave
+
+# Custom field names in NetBox (must exist before starting dnsdave-netbox)
+[sync.custom_fields]
+scope_id   = "dnsdave_scope_id"
+mac        = "dnsdave_mac"
+expires_at = "dnsdave_expires_at"
+reserved   = "dnsdave_reserved"
+gateway    = "dnsdave_gateway"
+
+# ── On lease expiry / release ────────────────────────────────────
+[sync.lifecycle]
+on_lease_expiry   = "free"        # "free" (status→available) | "remove" | "keep"
+on_lease_release  = "free"
+on_scope_delete   = "keep"        # "keep" (Prefix status→container) | "remove"
+
+# ── Conflict strategy ────────────────────────────────────────────
+[sync.conflict]
+strategy = "overwrite"    # "overwrite" | "skip" | "tag_conflict" | "merge"
+# overwrite:     DNSDave data always wins
+# skip:          if the object exists with a different value, leave it unchanged
+# tag_conflict:  add a "dnsdave-conflict" tag and log; do not overwrite
+# merge:         update only fields that NetBox has empty/null
+
+# ── Device auto-creation (requires sync.devices = true) ──────────
+[devices]
+auto_create           = false       # create new Device records for unknown MACs
+auto_create_dry_run   = true        # log what would be created; do not write
+auto_create_max_per_hour = 10       # safety cap
+auto_create_mac_prefix   = []       # restrict to OUI prefixes e.g. ["aa:bb:cc"]
+default_role          = "server"    # NetBox device role slug
+default_device_type   = "generic"   # NetBox device type slug
+default_site          = ""
+default_tenant        = ""
+interface_name        = "eth0"      # interface name used for IP assignment
+```
+
+### 17.6 NetBox Custom Fields
+
+Before starting `dnsdave-netbox`, create the following custom fields in NetBox (Admin → Customisation → Custom Fields):
+
+| Field name | Type | Object types | Required | Purpose |
+|---|---|---|---|---|
+| `dnsdave_scope_id` | Text | IP Address, Prefix, IP Range | No | DNSDave scope identifier |
+| `dnsdave_mac` | Text | IP Address | No | MAC address of the leased device |
+| `dnsdave_expires_at` | Date/Time | IP Address | No | Lease expiry timestamp |
+| `dnsdave_reserved` | Boolean | IP Address | No | True if this is a static reservation |
+| `dnsdave_gateway` | Text | Prefix | No | DHCP gateway IP |
+
+A Bootstrap script (`deploy/netbox/bootstrap_custom_fields.py`) is provided that creates these fields automatically using the NetBox API.
+
+### 17.7 Docker Compose Integration
+
+#### With Diode
+
+```yaml
+# docker-compose.netbox.yml (include alongside docker-compose.yml)
+services:
+  diode-server:
+    image: netboxlabs/diode:latest
+    environment:
+      DIODE_NETBOX_URL:         "http://netbox:8080"
+      DIODE_NETBOX_API_TOKEN:   "${NETBOX_TOKEN}"
+      DIODE_SECRET_KEY:         "${DIODE_SECRET_KEY}"
+    ports: ["8080:8080"]          # gRPC
+    depends_on: [netbox]
+
+  dnsdave-netbox:
+    image: ghcr.io/dnsdave/dnsdave-netbox:latest
+    environment:
+      DNSDAVE_NATS_URL:          "nats://nats:4222"
+      DNSDAVE_NETBOX_CONFIG:     "/config/netbox.toml"
+    volumes:
+      - ./deploy/netbox/diode.toml:/config/netbox.toml:ro
+      - ./secrets/netbox.creds:/run/secrets/netbox.creds:ro
+    depends_on: [nats, diode-server]
+```
+
+#### With REST API Only (no Diode)
+
+```yaml
+  dnsdave-netbox:
+    image: ghcr.io/dnsdave/dnsdave-netbox:latest
+    environment:
+      DNSDAVE_NATS_URL:          "nats://nats:4222"
+      DNSDAVE_NETBOX_CONFIG:     "/config/netbox.toml"
+      DNSDAVE_NETBOX_API_TOKEN:  "${NETBOX_TOKEN}"   # override toml token
+    volumes:
+      - ./deploy/netbox/api.toml:/config/netbox.toml:ro
+    depends_on: [nats]
+```
+
+### 17.8 Kubernetes Deployment
+
+In Kubernetes, `dnsdave-netbox` deploys as a single-replica `Deployment` (not a DaemonSet – it is a control-plane component, not a data-plane one):
+
+```yaml
+# templates/deployment-netbox.yaml (Helm)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dnsdave-netbox
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: dnsdave-netbox
+          image: ghcr.io/dnsdave/dnsdave-netbox:{{ .Values.image.tag }}
+          envFrom:
+            - secretRef:
+                name: dnsdave-netbox-secrets   # NETBOX_TOKEN, DIODE_API_KEY
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config
+          configMap:
+            name: dnsdave-netbox-config
+```
+
+Leader election is not required – `dnsdave-netbox` is idempotent (all pushes are create-or-update) so running a second replica during a rolling update causes harmless duplicate pushes that Diode or the REST API deduplicates.
+
+### 17.9 Health and Observability
+
+`dnsdave-netbox` exposes a health endpoint on `:9095/health` and Prometheus metrics on `:9095/metrics`:
+
+| Metric | Type | Description |
+|---|---|---|
+| `dnsdave_netbox_pushes_total` | Counter | `mode`, `object_type`, `status` (success/conflict/error) |
+| `dnsdave_netbox_push_duration_ms` | Histogram | Round-trip latency to Diode / NetBox API |
+| `dnsdave_netbox_nats_lag` | Gauge | Unacked NATS messages (back-pressure indicator) |
+| `dnsdave_netbox_devices_created_total` | Counter | Auto-created device records |
+| `dnsdave_netbox_conflicts_total` | Counter | `strategy`, `object_type` |
+
+The health endpoint returns `503` if the NATS lag exceeds the configured `max_lag_seconds` threshold, enabling Kubernetes liveness probes to surface NetBox outages as a container health issue.

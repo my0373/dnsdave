@@ -220,7 +220,8 @@ This document compares DNSDave against Pi-hole, major open-source DNS/DHCP tools
 | Zero-downtime config hot-swap | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ✅ | ✅ |
 | Distroless container (no shell) | ✅ | ❌ | ❌ | ❌ | 🟡 | ✅ | ❌ | ❌ | - |
 | Minimal Pi 3 profile (1 GB RAM) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | ❌ |
-| IPAM (IP Address Management) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| IPAM (native, built-in) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **NetBox IPAM push integration** | 🔮 v0.7 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | — |
 
 ---
 
@@ -290,7 +291,7 @@ Be explicit about gaps. These are features that competing products offer that DN
 
 | Feature | Closest alternative |
 |---------|-------------------|
-| **IP Address Management (IPAM)** – subnet tracking, address utilisation, network discovery | Integrate with [NetBox](https://netbox.dev) or [phpIPAM](https://phpipam.net) |
+| **IP Address Management (IPAM)** – no built-in subnet planning, utilisation tracking, or network discovery | `dnsdave-netbox` (v0.7) pushes leases, prefixes, and DNS records to [NetBox](https://netbox.dev) 4.5+ automatically via Diode or REST API; [phpIPAM](https://phpipam.net) reachable via HTTP webhook |
 | **Full recursive resolver** – walking the DNS tree from root hints | Configure a DoH/DoT upstream like Cloudflare 1.1.1.1 or self-hosted Unbound |
 | **TSIG authentication** (v1) – keyed auth for zone transfers and RFC 2136 | IP-CIDR `allow_update` / `allow_transfer` lists used instead in v1; TSIG is on the roadmap |
 | **DNS-over-QUIC (DoQ)** – QUIC-based DNS transport | Planned post-v1 |
@@ -399,9 +400,9 @@ Infoblox is the enterprise DDI market leader. A full Infoblox deployment handles
 
 **Where DNSDave wins:** Cost (free vs $15K–$100K+/yr), open source, no vendor lock-in, API quality (Infoblox's WAPI is comprehensive but complex), cloud-native deployment, developer experience.
 
-**Where Infoblox wins:** IPAM (DNSDave has no IPAM – this is a fundamental gap for enterprise DDI), enterprise RBAC, compliance reporting, threat intelligence feeds, hardware appliances with guaranteed availability, 24/7 support, Windows IPAM integration.
+**Where Infoblox wins:** Native IPAM (DNSDave pushes to NetBox for IPAM data but has no built-in subnet planning or network discovery), enterprise RBAC, compliance reporting, threat intelligence feeds, hardware appliances with guaranteed availability, 24/7 support, Windows IPAM integration.
 
-**What DNSDave explicitly lacks vs Infoblox:** IPAM. The "I" in DDI is not in scope for DNSDave v1. Organisations needing subnet management, address utilisation tracking, and network discovery should integrate DNSDave with [NetBox](https://netbox.dev) (open source) or retain Infoblox for IPAM while evaluating DNSDave for the DNS and DHCP layers.
+**What DNSDave explicitly lacks vs Infoblox:** Built-in IPAM. DNSDave's `dnsdave-netbox` container (v0.7) automatically pushes DHCP leases, scopes, and DNS records to NetBox 4.5+ via Diode or REST API, providing a continuously reconciled IPAM view. This covers the most common IPAM use cases (IP tracking, lease visibility, prefix utilisation) but not network discovery or rack/cable management. Organisations requiring full DDI including network discovery should use DNSDave alongside [NetBox](https://netbox.dev) for a complete open-source DDI stack.
 
 ---
 
@@ -441,7 +442,7 @@ DNSDave targets the gap between Pi-hole (excellent filtering, limited management
 - Multi-architecture containers that run on a Raspberry Pi and an AWS Graviton instance with the same image
 
 **DNSDave is not the right choice when you need:**
-- IPAM (subnet management, network discovery) – use Infoblox or NetBox
+- Built-in IPAM (subnet planning, network discovery, rack management) – `dnsdave-netbox` pushes to NetBox for tracking; full IPAM UI requires NetBox
 - A public internet authoritative DNS server at scale – use PowerDNS or Cloudflare
 - A Kubernetes service discovery DNS – use CoreDNS
 - A single 5 MB binary on an OpenWrt router – use dnsmasq
